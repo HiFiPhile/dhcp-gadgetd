@@ -1,6 +1,6 @@
 # DHCP Gadget Server
 
-Simple Python DHCP server for USB gadget bridge setups.
+Tired of randomly changing DHCP addresses for your USB gadget devices? This simple Python DHCP server allows you to assign static IP addresses based on the USB device path, making it easier to manage and connect to your gadgets.
 
 ## Features
 
@@ -25,6 +25,12 @@ pip install -r requirements.txt
 ## Run
 
 ```bash
+sudo python3 dhcp_server.py --config config.example.json
+```
+
+If `bridge` is not set in config, pass it via CLI:
+
+```bash
 sudo python3 dhcp_server.py --bridge gadget0 --config config.example.json
 ```
 
@@ -32,6 +38,7 @@ sudo python3 dhcp_server.py --bridge gadget0 --config config.example.json
 
 ```json
 {
+  "bridge": "gadget0",
   "subnet": "192.168.7.0/24",
   "router": "192.168.7.1",
   "server_ip": "192.168.7.1",
@@ -45,6 +52,7 @@ sudo python3 dhcp_server.py --bridge gadget0 --config config.example.json
 
 `router` is optional. If omitted, the DHCP `router` option is not sent.
 `dns` is optional. If omitted, the DHCP DNS option is not sent.
+`bridge` is optional in CLI when present in config.
 
 ## Notes
 

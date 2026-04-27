@@ -25,7 +25,17 @@ from pathlib import Path
 from typing import Any, Optional
 
 try:
-    from scapy.all import BOOTP, DHCP, Ether, IP, UDP, conf, get_if_hwaddr, sendp, sniff
+    from scapy.all import (
+        AsyncSniffer,
+        BOOTP,
+        DHCP,
+        Ether,
+        IP,
+        UDP,
+        conf,
+        get_if_hwaddr,
+        sendp,
+    )
 except ImportError as exc:  # pragma: no cover - import guard
     raise SystemExit(
         "scapy is required. Install dependencies with: pip install -r requirements.txt"
@@ -449,17 +459,53 @@ class GadgetDhcpServer:
             usb_path,
         )
 
+    def _safe_handle_packet(self, packet: Any) -> None:
+        try:
+            self.handle_packet(packet)
+        except Exception:
+            LOG.error("Unhandled exception in packet handler", exc_info=True)
+
+    @staticmethod
+    def _stop_sniffer(sniffer: AsyncSniffer, timeout: float = 3.0) -> None:
+        try:
+            sniffer.stop(join=False)
+            if sniffer.thread is not None:
+                sniffer.thread.join(timeout=timeout)
+                if sniffer.thread.is_alive():
+                    LOG.warning("Sniffer thread did not stop within %.1fs", timeout)
+        except Exception:
+            LOG.debug("Ignoring async sniffer stop error", exc_info=True)
+
     def serve_forever(self) -> None:
         conf.checkIPaddr = False
 
         while self.running:
+            sniffer: Optional[AsyncSniffer] = None
             try:
-                sniff(
+                sniffer = AsyncSniffer(
                     iface=self.bridge,
                     filter="udp and (port 67 or 68)",
-                    prn=self.handle_packet,
+                    prn=self._safe_handle_packet,
                     store=False,
                 )
+                sniffer.start()
+                LOG.debug("Async sniff started on bridge=%s", self.bridge)
+
+                while self.running and sniffer.running:
+                    time.sleep(0.2)
+
+                if sniffer.running:
+                    self._stop_sniffer(sniffer)
+                elif self.running:
+                    thread_alive = (
+                        sniffer.thread is not None and sniffer.thread.is_alive()
+                    )
+                    LOG.warning(
+                        "Async sniffer stopped unexpectedly bridge=%s thread_alive=%s",
+                        self.bridge,
+                        thread_alive,
+                    )
+                    time.sleep(1)
             except ValueError as exc:
                 LOG.error("Sniff failed on bridge=%s: %s", self.bridge, exc)
                 time.sleep(1)
@@ -470,6 +516,9 @@ class GadgetDhcpServer:
                     continue
                 LOG.error("Sniff OSError on bridge=%s: %s", self.bridge, exc)
                 time.sleep(1)
+            finally:
+                if sniffer is not None and sniffer.running:
+                    self._stop_sniffer(sniffer)
 
 
 def load_config(config_path: str) -> dict[str, Any]:
@@ -484,6 +533,12 @@ def load_config(config_path: str) -> dict[str, Any]:
     for key in required:
         if key not in data:
             raise ConfigError(f"missing required config field: {key}")
+
+    if "bridge" in data:
+        bridge = data["bridge"]
+        if not isinstance(bridge, str) or not bridge.strip():
+            raise ConfigError("bridge must be a non-empty string when provided")
+        data["bridge"] = bridge.strip()
 
     network = ipaddress.ip_network(data["subnet"], strict=False)
     if "router" in data:
@@ -551,8 +606,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--bridge",
-        required=True,
-        help="Bridge interface to inspect (example: gadget0)",
+        required=False,
+        help="Bridge interface to inspect (example: gadget0); optional if set in config as 'bridge'",
     )
     parser.add_argument(
         "--config",
@@ -581,7 +636,12 @@ def main(argv: list[str]) -> int:
         LOG.error("Invalid config: %s", exc)
         return 2
 
-    server = GadgetDhcpServer(bridge=args.bridge, config=config)
+    bridge = args.bridge or config.get("bridge")
+    if not bridge:
+        LOG.error("Bridge is required via --bridge or config field 'bridge'")
+        return 2
+
+    server = GadgetDhcpServer(bridge=bridge, config=config)
 
     def _stop(_signum: int, _frame: Any) -> None:
         LOG.info("Stopping server")
@@ -590,7 +650,7 @@ def main(argv: list[str]) -> int:
     signal.signal(signal.SIGINT, _stop)
     signal.signal(signal.SIGTERM, _stop)
 
-    LOG.info("Starting DHCP server bridge=%s", args.bridge)
+    LOG.info("Starting DHCP server bridge=%s", bridge)
     LOG.info("Static usb-path mappings: %d", len(server.static_by_usb_path))
     LOG.debug("Requires root or capabilities for raw packet capture/send")
 
@@ -599,8 +659,6 @@ def main(argv: list[str]) -> int:
     except PermissionError:
         LOG.error("Permission denied; run as root or add NET_RAW capability")
         return 1
-    except KeyboardInterrupt:
-        return 0
 
     return 0
 
