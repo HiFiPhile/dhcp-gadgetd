@@ -34,6 +34,59 @@ If `bridge` is not set in config, pass it via CLI:
 sudo python3 dhcp_server.py --bridge gadget0 --config config.example.json
 ```
 
+## Run as systemd service
+
+Install service files and start automatically:
+
+```bash
+sudo ./install-systemd.sh
+```
+
+This installs:
+
+- app code in `/opt/dhcp-gadget`
+- default config in `/etc/dhcp-gadget/config.json` (only if missing)
+- service env file in `/etc/default/dhcp-gadget`
+- unit file in `/etc/systemd/system/dhcp-gadget.service`
+
+To force bridge selection from service env, set in `/etc/default/dhcp-gadget`:
+
+```bash
+BRIDGE=gadget0
+```
+
+Manage service:
+
+```bash
+sudo systemctl status dhcp-gadget.service
+sudo systemctl restart dhcp-gadget.service
+sudo journalctl -u dhcp-gadget.service -f
+```
+
+The unit is hardened with a limited capability set:
+
+- `CAP_NET_RAW`
+- `CAP_NET_BIND_SERVICE`
+
+If you change [dhcp-gadget.service](dhcp-gadget.service), reinstall or copy the unit again, then run:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart dhcp-gadget.service
+```
+
+Uninstall service but keep config:
+
+```bash
+sudo ./uninstall-systemd.sh
+```
+
+Uninstall and purge config/env files too:
+
+```bash
+sudo ./uninstall-systemd.sh --purge
+```
+
 ## Configuration format
 
 ```json
