@@ -4,9 +4,9 @@ Tired of randomly changing DHCP addresses for your USB gadget devices? This simp
 
 ## Features
 
-- Select bridge interface (for example `gadget0`)
-- Discover attached lower interfaces from `/sys/class/net/<bridge>/lower_*`
-- Resolve USB device path from each lower interface (for example `1-2:1.0`)
+- Discover interfaces bound to Linux `cdc_ether` and `cdc_eem` drivers
+- React to udev hotplug events and bind packet receivers on all active supported interfaces
+- Resolve USB device path from each active interface (for example `1-2:1.0`)
 - Allocate static DHCP address by USB device path
 - Fallback to dynamic pool for unknown USB device paths
 
@@ -28,12 +28,6 @@ pip install -r requirements.txt
 sudo python3 dhcp_server.py --config config.example.json
 ```
 
-If `bridge` is not set in config, pass it via CLI:
-
-```bash
-sudo python3 dhcp_server.py --bridge gadget0 --config config.example.json
-```
-
 ## Run as systemd service
 
 Install service files and start automatically:
@@ -48,12 +42,6 @@ This installs:
 - default config in `/etc/dhcp-gadget/config.json` (only if missing)
 - service env file in `/etc/default/dhcp-gadget`
 - unit file in `/etc/systemd/system/dhcp-gadget.service`
-
-To force bridge selection from service env, set in `/etc/default/dhcp-gadget`:
-
-```bash
-BRIDGE=gadget0
-```
 
 Manage service:
 
@@ -91,7 +79,6 @@ sudo ./uninstall-systemd.sh --purge
 
 ```json
 {
-  "bridge": "gadget0",
   "subnet": "192.168.7.0/24",
   "router": "192.168.7.1",
   "server_ip": "192.168.7.1",
@@ -105,10 +92,14 @@ sudo ./uninstall-systemd.sh --purge
 
 `router` is optional. If omitted, the DHCP `router` option is not sent.
 `dns` is optional. If omitted, the DHCP DNS option is not sent.
-`bridge` is optional in CLI when present in config.
+
+Interfaces are auto-discovered from `cdc_ether`/`cdc_eem` driver bindings, so no bridge setting is required.
+
+Replies are sent with raw socket `sendto()` on the selected egress interface.
 
 ## Notes
 
 - This implementation is Linux-focused and uses sysfs paths.
+- Interface hotplug tracking is udev-based and requires `pyudev`.
 - Run with root privileges (or equivalent capabilities) because packet sniffing/sending is raw.
-- USB path format comes from sysfs resolution for each attached lower interface.
+- USB path format comes from sysfs resolution for each attached interface.

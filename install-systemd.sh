@@ -46,12 +46,9 @@ fi
 if [[ ! -f "${ENV_FILE}" ]]; then
   cat > "${ENV_FILE}" <<'EOF'
 # Environment overrides for dhcp-gadget.service
-# Set BRIDGE if you want to force a bridge from service env:
-# BRIDGE=gadget0
 
 CONFIG=/etc/dhcp-gadget/config.json
 LOG_LEVEL=INFO
-BRIDGE=
 EOF
   echo "Created ${ENV_FILE}"
 else

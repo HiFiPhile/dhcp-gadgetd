@@ -1,5 +1,4 @@
 {
-  "bridge": "gadget0",
   "subnet": "192.168.8.0/24",
   "server_ip": "192.168.8.1",
   "lease_time": 900,

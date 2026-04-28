@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Simple DHCP server for USB gadget bridge setups.
+"""Simple DHCP server for USB gadget cdc_ether/cdc_eem setups.
 
 Features:
-- Select bridge interface (example: gadget0)
-- Discover attached lower interfaces from /sys/class/net/<bridge>/lower_*
-- Resolve USB device path for each lower interface (example: 1-2:1.0)
+- Discover active network interfaces bound to cdc_ether/cdc_eem drivers
+- Resolve USB device path for each supported interface (example: 1-2:1.0)
 - Allocate static IP by USB device path
 - Fallback to dynamic pool for unknown device paths
 """
@@ -17,7 +16,9 @@ import ipaddress
 import json
 import logging
 import re
+import select
 import signal
+import socket
 import sys
 import time
 from dataclasses import dataclass
@@ -26,7 +27,6 @@ from typing import Any, Optional
 
 try:
     from scapy.all import (
-        AsyncSniffer,
         BOOTP,
         DHCP,
         Ether,
@@ -34,17 +34,25 @@ try:
         UDP,
         conf,
         get_if_hwaddr,
-        sendp,
     )
 except ImportError as exc:  # pragma: no cover - import guard
     raise SystemExit(
         "scapy is required. Install dependencies with: pip install -r requirements.txt"
     ) from exc
 
+try:
+    import pyudev
+except ImportError as exc:  # pragma: no cover - import guard
+    raise SystemExit(
+        "pyudev is required for udev hotplug handling. Install dependencies with: pip install -r requirements.txt"
+    ) from exc
+
 
 LOG = logging.getLogger("dhcp_gadget")
 USB_IFACE_RE = re.compile(r"^\d+-\d+(?:\.\d+)*:\d+\.\d+$")
 USB_DEVICE_RE = re.compile(r"^\d+-\d+(?:\.\d+)*$")
+ETH_P_ALL = 0x0003
+SUPPORTED_USB_NET_DRIVERS = {"cdc_ether", "cdc_eem"}
 
 
 @dataclass
@@ -131,8 +139,7 @@ class LeaseAllocator:
 
 
 class GadgetDhcpServer:
-    def __init__(self, bridge: str, config: dict[str, Any]) -> None:
-        self.bridge = bridge
+    def __init__(self, config: dict[str, Any]) -> None:
         self.network = ipaddress.ip_network(config["subnet"], strict=False)
         self.router: Optional[str] = config.get("router")
         first_host = str(next(self.network.hosts()))
@@ -150,19 +157,24 @@ class GadgetDhcpServer:
         )
 
         self.running = True
-        self.lower_ifaces: list[str] = []
+        self.usb_net_ifaces: list[str] = []
         self.iface_to_usb_path: dict[str, str] = {}
         self.iface_to_mac: dict[str, str] = {}
 
-    def list_lower_interfaces(self) -> list[str]:
-        base = Path("/sys/class/net") / self.bridge
-        if not base.exists():
-            raise FileNotFoundError(f"bridge interface not found: {self.bridge}")
-
+    def list_supported_usb_net_interfaces(self) -> list[str]:
         out: list[str] = []
-        for entry in sorted(base.glob("lower_*")):
-            ifname = entry.name.replace("lower_", "", 1)
-            if ifname:
+        for entry in sorted(Path("/sys/class/net").iterdir()):
+            if not entry.is_dir():
+                continue
+            ifname = entry.name
+            driver_link = entry / "device" / "driver"
+            if not driver_link.exists():
+                continue
+            try:
+                driver_name = driver_link.resolve().name
+            except OSError:
+                continue
+            if driver_name in SUPPORTED_USB_NET_DRIVERS:
                 out.append(ifname)
         return out
 
@@ -199,8 +211,9 @@ class GadgetDhcpServer:
             return None
         return mac
 
-    def refresh_topology(self) -> None:
-        current_ifaces = self.list_lower_interfaces()
+    def refresh_interfaces(self) -> None:
+        current_ifaces = self.list_supported_usb_net_interfaces()
+
         current_map: dict[str, str] = {}
         current_mac_map: dict[str, str] = {}
         for ifname in current_ifaces:
@@ -212,45 +225,36 @@ class GadgetDhcpServer:
                 current_mac_map[ifname] = mac
 
         changed = (
-            current_ifaces != self.lower_ifaces
+            current_ifaces != self.usb_net_ifaces
             or current_map != self.iface_to_usb_path
             or current_mac_map != self.iface_to_mac
         )
 
-        self.lower_ifaces = current_ifaces
+        self.usb_net_ifaces = current_ifaces
         self.iface_to_usb_path = current_map
         self.iface_to_mac = current_mac_map
 
         if changed:
-            LOG.debug("Bridge topology refreshed")
-            for ifname in self.lower_ifaces:
+            LOG.debug("supported USB net interface set refreshed drivers=%s", sorted(SUPPORTED_USB_NET_DRIVERS))
+            for ifname in self.usb_net_ifaces:
                 LOG.debug(
-                    "  lower=%s usb_path=%s",
+                    "  iface=%s usb_path=%s",
                     ifname,
                     self.iface_to_usb_path.get(ifname, "<unresolved>"),
                 )
 
-    def resolve_ingress_interface(self, sniffed_on: Optional[str], client_mac: str) -> Optional[str]:
-        if sniffed_on in self.lower_ifaces:
-            return sniffed_on
+    def resolve_ingress_interface(self, ingress_ifname: Optional[str], client_mac: str) -> Optional[str]:
+        if ingress_ifname in self.usb_net_ifaces:
+            return ingress_ifname
 
         for ifname, if_mac in self.iface_to_mac.items():
             if if_mac == client_mac:
                 return ifname
 
-        if len(self.lower_ifaces) == 1:
-            return self.lower_ifaces[0]
+        if len(self.usb_net_ifaces) == 1:
+            return self.usb_net_ifaces[0]
 
         return None
-
-    def lookup_topology_on_discover(self) -> None:
-        try:
-            self.refresh_topology()
-        except FileNotFoundError as exc:
-            LOG.warning("%s", exc)
-            self.lower_ifaces = []
-            self.iface_to_usb_path = {}
-            self.iface_to_mac = {}
 
     def _get_option(self, options: list[Any], key: str) -> Any:
         for option in options:
@@ -306,45 +310,61 @@ class GadgetDhcpServer:
             options.append(("name_server", self.dns_servers))
         return options
 
+    def _send_raw_frame(self, egress_ifname: str, frame: Any, tag: str) -> bool:
+        try:
+            raw_frame = bytes(frame)
+            with socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ETH_P_ALL)) as tx_sock:
+                tx_sock.sendto(raw_frame, (egress_ifname, 0))
+            return True
+        except OSError as exc:
+            if exc.errno == errno.ENODEV:
+                LOG.warning("Send skipped; interface unavailable iface=%s %s", egress_ifname, tag)
+                return False
+            raise
+        except ValueError as exc:
+            LOG.warning("Send failed iface=%s %s: %s", egress_ifname, tag, exc)
+            return False
+
     def _send_offer_or_ack(
         self,
         packet: Any,
         egress_ifname: str,
         offered_ip: str,
         msg_type: str,
-    ) -> None:
-        server_mac = get_if_hwaddr(egress_ifname)
+    ) -> bool:
         bootp = packet[BOOTP]
 
         options: list[Any] = [("message-type", msg_type)]
         options.extend(self._build_common_options())
         options.append("end")
 
-        reply = (
-            Ether(src=server_mac, dst="ff:ff:ff:ff:ff:ff")
-            / IP(src=self.server_ip, dst="255.255.255.255")
-            / UDP(sport=67, dport=68)
-            / BOOTP(
-                op=2,
-                xid=bootp.xid,
-                yiaddr=offered_ip,
-                siaddr=self.server_ip,
-                chaddr=bootp.chaddr,
-                flags=bootp.flags,
-            )
-            / DHCP(options=options)
-        )
-
         try:
-            sendp(reply, iface=egress_ifname, verbose=False)
+            server_mac = get_if_hwaddr(egress_ifname)
+            reply = (
+                Ether(src=server_mac, dst="ff:ff:ff:ff:ff:ff")
+                / IP(src=self.server_ip, dst="255.255.255.255")
+                / UDP(sport=67, dport=68)
+                / BOOTP(
+                    op=2,
+                    xid=bootp.xid,
+                    yiaddr=offered_ip,
+                    siaddr=self.server_ip,
+                    chaddr=bootp.chaddr,
+                    flags=bootp.flags,
+                )
+                / DHCP(options=options)
+            )
+            return self._send_raw_frame(egress_ifname, reply, f"msg_type={msg_type}")
         except OSError as exc:
             if exc.errno == errno.ENODEV:
-                LOG.warning("Send skipped; interface vanished iface=%s", egress_ifname)
-                return
+                LOG.warning("Send skipped; interface unavailable iface=%s msg_type=%s", egress_ifname, msg_type)
+                return False
             raise
+        except ValueError as exc:
+            LOG.warning("Send failed iface=%s msg_type=%s: %s", egress_ifname, msg_type, exc)
+            return False
 
-    def _send_nak(self, packet: Any, egress_ifname: str, reason: str) -> None:
-        server_mac = get_if_hwaddr(egress_ifname)
+    def _send_nak(self, packet: Any, egress_ifname: str, reason: str) -> bool:
         bootp = packet[BOOTP]
 
         options: list[Any] = [
@@ -354,28 +374,31 @@ class GadgetDhcpServer:
             "end",
         ]
 
-        reply = (
-            Ether(src=server_mac, dst="ff:ff:ff:ff:ff:ff")
-            / IP(src=self.server_ip, dst="255.255.255.255")
-            / UDP(sport=67, dport=68)
-            / BOOTP(
-                op=2,
-                xid=bootp.xid,
-                yiaddr="0.0.0.0",
-                siaddr=self.server_ip,
-                chaddr=bootp.chaddr,
-                flags=bootp.flags,
-            )
-            / DHCP(options=options)
-        )
-
         try:
-            sendp(reply, iface=egress_ifname, verbose=False)
+            server_mac = get_if_hwaddr(egress_ifname)
+            reply = (
+                Ether(src=server_mac, dst="ff:ff:ff:ff:ff:ff")
+                / IP(src=self.server_ip, dst="255.255.255.255")
+                / UDP(sport=67, dport=68)
+                / BOOTP(
+                    op=2,
+                    xid=bootp.xid,
+                    yiaddr="0.0.0.0",
+                    siaddr=self.server_ip,
+                    chaddr=bootp.chaddr,
+                    flags=bootp.flags,
+                )
+                / DHCP(options=options)
+            )
+            return self._send_raw_frame(egress_ifname, reply, "msg_type=nak")
         except OSError as exc:
             if exc.errno == errno.ENODEV:
-                LOG.warning("NAK send skipped; interface vanished iface=%s", egress_ifname)
-                return
+                LOG.warning("NAK send skipped; interface unavailable iface=%s", egress_ifname)
+                return False
             raise
+        except ValueError as exc:
+            LOG.warning("NAK send failed iface=%s: %s", egress_ifname, exc)
+            return False
 
     def handle_packet(self, packet: Any) -> None:
         if not (packet.haslayer(DHCP) and packet.haslayer(BOOTP)):
@@ -390,14 +413,14 @@ class GadgetDhcpServer:
         client_mac = self._mac_from_packet(packet)
 
         if msg_type == "discover":
-            self.lookup_topology_on_discover()
+            self.refresh_interfaces()
 
-        sniffed_on = getattr(packet, "sniffed_on", None)
-        ifname = self.resolve_ingress_interface(sniffed_on, client_mac)
+        ingress_ifname = getattr(packet, "sniffed_on", None)
+        ifname = self.resolve_ingress_interface(ingress_ifname, client_mac)
         if not ifname:
             LOG.debug(
-                "Ignore packet; ingress interface unresolved sniffed_on=%s mac=%s",
-                sniffed_on,
+                "Ignore packet; ingress interface unresolved ingress_ifname=%s mac=%s",
+                ingress_ifname,
                 client_mac,
             )
             return
@@ -426,99 +449,225 @@ class GadgetDhcpServer:
             return
 
         if msg_type == "discover":
-            self._send_offer_or_ack(packet, self.bridge, allocated_ip, "offer")
+            sent = self._send_offer_or_ack(packet, ifname, allocated_ip, "offer")
+            if sent:
+                LOG.info(
+                    "OFFER ip=%s mac=%s iface=%s usb_path=%s",
+                    allocated_ip,
+                    client_mac,
+                    ifname,
+                    usb_path,
+                )
+            else:
+                LOG.warning(
+                    "OFFER dropped ip=%s mac=%s iface=%s usb_path=%s",
+                    allocated_ip,
+                    client_mac,
+                    ifname,
+                    usb_path,
+                )
+            return
+
+        static_ip = self.static_by_usb_path.get(usb_path, None) if usb_path else None
+        if static_ip and requested_ip and requested_ip != static_ip:
+            sent = self._send_nak(packet, ifname, "requested ip does not match static mapping")
+            if sent:
+                LOG.warning(
+                    "NAK mac=%s requested=%s static=%s iface=%s usb_path=%s",
+                    client_mac,
+                    requested_ip,
+                    static_ip,
+                    ifname,
+                    usb_path,
+                )
+            else:
+                LOG.warning(
+                    "NAK dropped mac=%s requested=%s static=%s iface=%s usb_path=%s",
+                    client_mac,
+                    requested_ip,
+                    static_ip,
+                    ifname,
+                    usb_path,
+                )
+            return
+
+        self.allocator.renew(client_mac, allocated_ip)
+        sent = self._send_offer_or_ack(packet, ifname, allocated_ip, "ack")
+        if sent:
             LOG.info(
-                "OFFER ip=%s mac=%s iface=%s usb_path=%s",
+                "ACK ip=%s mac=%s iface=%s usb_path=%s",
                 allocated_ip,
                 client_mac,
                 ifname,
                 usb_path,
             )
-            return
-
-        static_ip = self.static_by_usb_path.get(usb_path, None) if usb_path else None
-        if static_ip and requested_ip and requested_ip != static_ip:
-            self._send_nak(packet, self.bridge, "requested ip does not match static mapping")
+        else:
             LOG.warning(
-                "NAK mac=%s requested=%s static=%s iface=%s usb_path=%s",
+                "ACK dropped ip=%s mac=%s iface=%s usb_path=%s",
+                allocated_ip,
                 client_mac,
-                requested_ip,
-                static_ip,
                 ifname,
                 usb_path,
             )
-            return
 
-        self.allocator.renew(client_mac, allocated_ip)
-        self._send_offer_or_ack(packet, self.bridge, allocated_ip, "ack")
-        LOG.info(
-            "ACK ip=%s mac=%s iface=%s usb_path=%s",
-            allocated_ip,
-            client_mac,
-            ifname,
-            usb_path,
-        )
-
-    def _safe_handle_packet(self, packet: Any) -> None:
+    def _safe_process_packet(self, packet: Any) -> None:
         try:
             self.handle_packet(packet)
         except Exception:
             LOG.error("Unhandled exception in packet handler", exc_info=True)
 
-    @staticmethod
-    def _stop_sniffer(sniffer: AsyncSniffer, timeout: float = 3.0) -> None:
+    def _open_receiver(self, ifname: str) -> Optional[socket.socket]:
         try:
-            sniffer.stop(join=False)
-            if sniffer.thread is not None:
-                sniffer.thread.join(timeout=timeout)
-                if sniffer.thread.is_alive():
-                    LOG.warning("Sniffer thread did not stop within %.1fs", timeout)
-        except Exception:
-            LOG.debug("Ignoring async sniffer stop error", exc_info=True)
+            recv_sock = socket.socket(
+                socket.AF_PACKET,
+                socket.SOCK_RAW,
+                socket.htons(ETH_P_ALL),
+            )
+            recv_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            recv_sock.bind((ifname, 0))
+            recv_sock.setblocking(False)
+            return recv_sock
+        except OSError as exc:
+            if exc.errno == errno.ENODEV:
+                LOG.info("Receiver bind deferred iface=%s; interface not ready", ifname)
+                return None
+            LOG.warning("Receiver bind failed iface=%s: %s", ifname, exc)
+            return None
+
+    def _sync_receivers(
+        self,
+        receivers: dict[str, socket.socket],
+        fd_to_iface: dict[int, str],
+    ) -> None:
+        target_ifaces = set(self.usb_net_ifaces)
+
+        for ifname in list(receivers.keys()):
+            if ifname in target_ifaces:
+                continue
+            LOG.info("Closing receiver iface=%s", ifname)
+            recv_sock = receivers.pop(ifname)
+            fd = recv_sock.fileno()
+            fd_to_iface.pop(fd, None)
+            recv_sock.close()
+
+        for ifname in sorted(target_ifaces):
+            if ifname in receivers:
+                continue
+            recv_sock = self._open_receiver(ifname)
+            if recv_sock is None:
+                continue
+            receivers[ifname] = recv_sock
+            fd_to_iface[recv_sock.fileno()] = ifname
+            LOG.info("Bound receiver iface=%s", ifname)
+
+    def _close_all_receivers(
+        self,
+        receivers: dict[str, socket.socket],
+        fd_to_iface: dict[int, str],
+    ) -> None:
+        for ifname in list(receivers.keys()):
+            LOG.info("Closing receiver iface=%s", ifname)
+            recv_sock = receivers.pop(ifname)
+            fd = recv_sock.fileno()
+            fd_to_iface.pop(fd, None)
+            recv_sock.close()
+
+    def _handle_receiver_data(self, ifname: str, recv_sock: socket.socket) -> None:
+        while True:
+            try:
+                frame, _ = recv_sock.recvfrom(65535)
+            except BlockingIOError:
+                return
+            except OSError as exc:
+                if exc.errno == errno.ENODEV:
+                    LOG.info("Receiver read stopped; interface vanished iface=%s", ifname)
+                if exc.errno == errno.ENETDOWN:
+                    LOG.info("Receiver read stopped; interface down iface=%s", ifname)
+                else:
+                    LOG.warning("Receiver read failed iface=%s: %s", ifname, exc)
+                raise
+
+            try:
+                packet = Ether(frame)
+            except Exception:
+                continue
+
+            setattr(packet, "sniffed_on", ifname)
+            self._safe_process_packet(packet)
 
     def serve_forever(self) -> None:
         conf.checkIPaddr = False
 
-        while self.running:
-            sniffer: Optional[AsyncSniffer] = None
-            try:
-                sniffer = AsyncSniffer(
-                    iface=self.bridge,
-                    filter="udp and (port 67 or 68)",
-                    prn=self._safe_handle_packet,
-                    store=False,
-                )
-                sniffer.start()
-                LOG.debug("Async sniff started on bridge=%s", self.bridge)
+        receivers: dict[str, socket.socket] = {}
+        fd_to_iface: dict[int, str] = {}
+        monitor = pyudev.Monitor.from_netlink(pyudev.Context())
+        monitor.filter_by(subsystem="net")
+        monitor.start()
+        monitor_fd = monitor.fileno()
+        last_resync = time.monotonic()
 
-                while self.running and sniffer.running:
-                    time.sleep(0.2)
+        try:
+            self.refresh_interfaces()
+            self._sync_receivers(receivers, fd_to_iface)
 
-                if sniffer.running:
-                    self._stop_sniffer(sniffer)
-                elif self.running:
-                    thread_alive = (
-                        sniffer.thread is not None and sniffer.thread.is_alive()
-                    )
-                    LOG.warning(
-                        "Async sniffer stopped unexpectedly bridge=%s thread_alive=%s",
-                        self.bridge,
-                        thread_alive,
-                    )
-                    time.sleep(1)
-            except ValueError as exc:
-                LOG.error("Sniff failed on bridge=%s: %s", self.bridge, exc)
-                time.sleep(1)
-            except OSError as exc:
-                if exc.errno == errno.ENODEV:
-                    LOG.warning("Bridge interface disappeared bridge=%s", self.bridge)
+            while self.running:
+                try:
+                    read_fds: list[Any] = [monitor_fd]
+                    read_fds.extend(receivers.values())
+                    ready, _, _ = select.select(read_fds, [], [], 1.0)
+                except OSError as exc:
+                    if exc.errno == errno.EINTR:
+                        continue
+                    LOG.error("udev monitor select failed: %s", exc)
                     time.sleep(1)
                     continue
-                LOG.error("Sniff OSError on bridge=%s: %s", self.bridge, exc)
-                time.sleep(1)
-            finally:
-                if sniffer is not None and sniffer.running:
-                    self._stop_sniffer(sniffer)
+
+                changed = False
+                for fd in ready:
+                    if fd == monitor_fd:
+                        while True:
+                            device = monitor.poll(timeout=0)
+                            if device is None:
+                                break
+
+                            action = device.action or "unknown"
+                            ifname = device.get("INTERFACE")
+                            LOG.debug("udev event action=%s interface=%s", action, ifname)
+                            changed = True
+                        continue
+
+                    recv_sock = fd
+                    sock_fd = recv_sock.fileno()
+                    ifname = fd_to_iface.get(sock_fd)
+                    if not ifname:
+                        continue
+
+                    try:
+                        self._handle_receiver_data(ifname, recv_sock)
+                    except OSError:
+                        stale = receivers.pop(ifname, None)
+                        if stale is not None:
+                            stale_fd = stale.fileno()
+                            fd_to_iface.pop(stale_fd, None)
+                            stale.close()
+                        changed = True
+
+                if not ready:
+                    now = time.monotonic()
+                    if now - last_resync >= 3.0:
+                        self.refresh_interfaces()
+                        self._sync_receivers(receivers, fd_to_iface)
+                        last_resync = now
+                    continue
+
+                if not changed:
+                    continue
+
+                self.refresh_interfaces()
+                self._sync_receivers(receivers, fd_to_iface)
+                last_resync = time.monotonic()
+        finally:
+            self._close_all_receivers(receivers, fd_to_iface)
 
 
 def load_config(config_path: str) -> dict[str, Any]:
@@ -533,12 +682,6 @@ def load_config(config_path: str) -> dict[str, Any]:
     for key in required:
         if key not in data:
             raise ConfigError(f"missing required config field: {key}")
-
-    if "bridge" in data:
-        bridge = data["bridge"]
-        if not isinstance(bridge, str) or not bridge.strip():
-            raise ConfigError("bridge must be a non-empty string when provided")
-        data["bridge"] = bridge.strip()
 
     network = ipaddress.ip_network(data["subnet"], strict=False)
     if "router" in data:
@@ -602,12 +745,7 @@ def load_config(config_path: str) -> dict[str, Any]:
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Simple DHCP server for USB gadget bridge clients"
-    )
-    parser.add_argument(
-        "--bridge",
-        required=False,
-        help="Bridge interface to inspect (example: gadget0); optional if set in config as 'bridge'",
+        description="Simple DHCP server for USB gadget cdc_ether/cdc_eem clients"
     )
     parser.add_argument(
         "--config",
@@ -636,12 +774,7 @@ def main(argv: list[str]) -> int:
         LOG.error("Invalid config: %s", exc)
         return 2
 
-    bridge = args.bridge or config.get("bridge")
-    if not bridge:
-        LOG.error("Bridge is required via --bridge or config field 'bridge'")
-        return 2
-
-    server = GadgetDhcpServer(bridge=bridge, config=config)
+    server = GadgetDhcpServer(config=config)
 
     def _stop(_signum: int, _frame: Any) -> None:
         LOG.info("Stopping server")
@@ -650,7 +783,7 @@ def main(argv: list[str]) -> int:
     signal.signal(signal.SIGINT, _stop)
     signal.signal(signal.SIGTERM, _stop)
 
-    LOG.info("Starting DHCP server bridge=%s", bridge)
+    LOG.info("Starting DHCP server for drivers=%s", sorted(SUPPORTED_USB_NET_DRIVERS))
     LOG.info("Static usb-path mappings: %d", len(server.static_by_usb_path))
     LOG.debug("Requires root or capabilities for raw packet capture/send")
 
