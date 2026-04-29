@@ -547,6 +547,7 @@ void dg_config_set_defaults(DgConfig *out_cfg) {
 int dg_config_load(const char *path, DgConfig *out_cfg) {
     char *json = NULL;
     size_t json_len = 0;
+    size_t i;
 
     if (path == NULL || out_cfg == NULL) {
         dg_log(DG_LOG_ERROR, "config load failed: invalid arguments");
@@ -577,5 +578,15 @@ int dg_config_load(const char *path, DgConfig *out_cfg) {
     free(json);
     dg_log(DG_LOG_INFO, "config loaded: lease_time=%u static_leases=%zu dns=%zu", out_cfg->pool.lease_seconds,
            out_cfg->static_lease_count, out_cfg->dns_count);
+
+    for (i = 0; i < out_cfg->static_lease_count; i++) {
+        char ip_text[INET_ADDRSTRLEN];
+        if (inet_ntop(AF_INET, &out_cfg->static_leases[i].ip, ip_text, sizeof(ip_text)) == NULL) {
+            strncpy(ip_text, "<invalid>", sizeof(ip_text) - 1U);
+            ip_text[sizeof(ip_text) - 1U] = '\0';
+        }
+        dg_log(DG_LOG_DEBUG, "static lease configured usb_path=%s ip=%s", out_cfg->static_leases[i].usb_path, ip_text);
+    }
+
     return 0;
 }

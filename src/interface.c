@@ -135,6 +135,7 @@ static int dg_fill_interface_entry(const char *ifname, DgInterfaceEntry *entry) 
     char path[PATH_MAX];
     char driver_link[PATH_MAX];
     char device_link[PATH_MAX];
+    char usb_path[DG_MAX_PATH_LEN];
     char mac_text[32];
     int n;
     unsigned int ifindex;
@@ -157,7 +158,8 @@ static int dg_fill_interface_entry(const char *ifname, DgInterfaceEntry *entry) 
     if (dg_readlink_into(path, device_link, sizeof(device_link)) != 0) {
         return -1;
     }
-    if (dg_extract_usb_path(device_link, entry->usb_path, sizeof(entry->usb_path)) != 0) {
+    if (dg_extract_usb_path(device_link, usb_path, sizeof(usb_path)) != 0) {
+        dg_log(DG_LOG_DEBUG, "usb path unresolved if=%s device_link=%s", ifname, device_link);
         return -1;
     }
 
@@ -179,9 +181,15 @@ static int dg_fill_interface_entry(const char *ifname, DgInterfaceEntry *entry) 
     if (snprintf(entry->ifname, sizeof(entry->ifname), "%s", ifname) < 0) {
         return -1;
     }
+    if (snprintf(entry->usb_path, sizeof(entry->usb_path), "%s", usb_path) < 0) {
+        return -1;
+    }
     if (snprintf(entry->mac, sizeof(entry->mac), "%s", mac_text) < 0) {
         return -1;
     }
+
+    dg_log(DG_LOG_DEBUG, "resolved iface if=%s idx=%d usb_path=%s mac=%s", entry->ifname, entry->ifindex,
+           entry->usb_path, entry->mac);
     return 0;
 }
 

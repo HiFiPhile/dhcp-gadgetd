@@ -715,24 +715,56 @@ static void dg_log_ip_action(const char *verb, uint8_t msg_type, const DgDhcpReq
            req->ifname[0] != '\0' ? req->ifname : "<unknown>", ip_buf);
 }
 
-static const char *dg_request_lease_key(const DgDhcpRequest *req) {
+static void dg_ipv4_to_text(struct in_addr ip, char *out, size_t out_len) {
+    if (out == NULL || out_len == 0U) {
+        return;
+    }
+    if (inet_ntop(AF_INET, &ip, out, (socklen_t)out_len) == NULL) {
+        strncpy(out, "<invalid>", out_len - 1U);
+        out[out_len - 1U] = '\0';
+    }
+}
+
+static const char *dg_request_lease_key(const DgDhcpRequest *req, int *out_is_usb_path) {
     const DgInterfaceEntry *iface = dg_interface_by_ifindex(req->ifindex);
     if (iface != NULL && iface->usb_path[0] != '\0') {
+        if (out_is_usb_path != NULL) {
+            *out_is_usb_path = 1;
+        }
+        dg_log(DG_LOG_DEBUG, "lease key resolved mac=%s if=%s usb_path=%s", req->client_mac,
+               req->ifname[0] != '\0' ? req->ifname : "<unknown>", iface->usb_path);
         return iface->usb_path;
     }
+
+    if (out_is_usb_path != NULL) {
+        *out_is_usb_path = 0;
+    }
+    dg_log(DG_LOG_DEBUG, "lease key fallback mac=%s if=%s key=%s", req->client_mac,
+           req->ifname[0] != '\0' ? req->ifname : "<unknown>", req->ifname[0] != '\0' ? req->ifname : "<empty>");
     return req->ifname;
 }
 
 static int dg_handle_discover(const DgDhcpRequest *req, uint64_t now_ms) {
     struct in_addr lease_ip;
-    const char *lease_key = dg_request_lease_key(req);
+    char lease_ip_buf[INET_ADDRSTRLEN];
+    int lease_key_is_usb_path = 0;
+    int used_static_lease = 0;
+    const char *lease_key = dg_request_lease_key(req, &lease_key_is_usb_path);
 
-    if (dg_allocator_lookup_static(g_state.allocator, lease_key, &lease_ip) != 0) {
+    if (dg_allocator_lookup_static(g_state.allocator, lease_key, &lease_ip) == 0) {
+        used_static_lease = 1;
+    } else {
         if (dg_allocator_assign_dynamic(g_state.allocator, req->client_mac, now_ms, &lease_ip) != 0) {
             dg_log(DG_LOG_WARN, "no available lease for DISCOVER mac=%s", req->client_mac);
             return 0;
         }
     }
+
+    dg_ipv4_to_text(lease_ip, lease_ip_buf, sizeof(lease_ip_buf));
+    dg_log(DG_LOG_DEBUG, "%s lease selected for DISCOVER mac=%s if=%s key_type=%s key=%s ip=%s",
+           used_static_lease ? "static" : "dynamic", req->client_mac,
+           req->ifname[0] != '\0' ? req->ifname : "<unknown>", lease_key_is_usb_path ? "usb_path" : "ifname",
+           lease_key, lease_ip_buf);
 
     if (dg_send_reply(req, DG_DHCP_TYPE_OFFER, lease_ip, 1) == 0) {
         dg_log_ip_action("sent", DG_DHCP_TYPE_OFFER, req, lease_ip);
@@ -743,8 +775,12 @@ static int dg_handle_discover(const DgDhcpRequest *req, uint64_t now_ms) {
 static int dg_handle_request(const DgDhcpRequest *req, uint64_t now_ms) {
     struct in_addr assigned_ip;
     struct in_addr wanted_ip;
+    char assigned_ip_buf[INET_ADDRSTRLEN];
+    char wanted_ip_buf[INET_ADDRSTRLEN];
     int have_wanted = 0;
-    const char *lease_key = dg_request_lease_key(req);
+    int lease_key_is_usb_path = 0;
+    int used_static_lease = 0;
+    const char *lease_key = dg_request_lease_key(req, &lease_key_is_usb_path);
 
     if (!dg_is_server_id_match(req)) {
         return 0;
@@ -758,7 +794,9 @@ static int dg_handle_request(const DgDhcpRequest *req, uint64_t now_ms) {
         have_wanted = 1;
     }
 
-    if (dg_allocator_lookup_static(g_state.allocator, lease_key, &assigned_ip) != 0) {
+    if (dg_allocator_lookup_static(g_state.allocator, lease_key, &assigned_ip) == 0) {
+        used_static_lease = 1;
+    } else {
         if (dg_allocator_assign_dynamic(g_state.allocator, req->client_mac, now_ms, &assigned_ip) != 0) {
             struct in_addr zero_ip;
             zero_ip.s_addr = 0U;
@@ -768,9 +806,18 @@ static int dg_handle_request(const DgDhcpRequest *req, uint64_t now_ms) {
         }
     }
 
+    dg_ipv4_to_text(assigned_ip, assigned_ip_buf, sizeof(assigned_ip_buf));
+    dg_log(DG_LOG_DEBUG, "%s lease selected for REQUEST mac=%s if=%s key_type=%s key=%s ip=%s",
+           used_static_lease ? "static" : "dynamic", req->client_mac,
+           req->ifname[0] != '\0' ? req->ifname : "<unknown>", lease_key_is_usb_path ? "usb_path" : "ifname",
+           lease_key, assigned_ip_buf);
+
     if (have_wanted && wanted_ip.s_addr != assigned_ip.s_addr) {
         struct in_addr zero_ip;
         zero_ip.s_addr = 0U;
+        dg_ipv4_to_text(wanted_ip, wanted_ip_buf, sizeof(wanted_ip_buf));
+        dg_log(DG_LOG_DEBUG, "request IP mismatch mac=%s if=%s requested=%s assigned=%s", req->client_mac,
+               req->ifname[0] != '\0' ? req->ifname : "<unknown>", wanted_ip_buf, assigned_ip_buf);
         (void)dg_send_reply(req, DG_DHCP_TYPE_NAK, zero_ip, 0);
         dg_log_ip_action("sent", DG_DHCP_TYPE_NAK, req, zero_ip);
         return 0;
