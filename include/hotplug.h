@@ -9,6 +9,7 @@ typedef enum {
 
 typedef struct {
 	DgHotplugAction action;
+	int ifindex;
 	char ifname[16];
 } DgHotplugEvent;
 

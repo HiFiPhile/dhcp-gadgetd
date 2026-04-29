@@ -98,17 +98,17 @@ int dg_server_tick(DgServer *server, int timeout_ms) {
                 break;
             }
 
-            dg_log(DG_LOG_DEBUG, "hotplug event: action=%s if=%s",
-                   dg_hotplug_action_name(evt.action), evt.ifname);
+                 dg_log(DG_LOG_DEBUG, "hotplug event: action=%s if=%s idx=%d",
+                     dg_hotplug_action_name(evt.action), evt.ifname, evt.ifindex);
 
             if (evt.action == DG_HOTPLUG_REMOVE) {
                 (void)dg_dhcp_proto_unbind_ifname(evt.ifname);
-                (void)dg_interface_remove(evt.ifname);
+                (void)dg_interface_remove(evt.ifindex);
                 continue;
             }
 
             if (evt.action == DG_HOTPLUG_ADD || evt.action == DG_HOTPLUG_MOVE) {
-                if (dg_interface_upsert(evt.ifname) == 0) {
+                if (dg_interface_upsert_with_ifindex(evt.ifname, evt.ifindex) == 0) {
                     const DgInterfaceEntry *iface = dg_interface_by_name(evt.ifname);
                     dg_log(DG_LOG_DEBUG, "hotplug upserted interface: if=%s idx=%d", evt.ifname, iface != NULL ? iface->ifindex : -1);
                     if (iface != NULL) {

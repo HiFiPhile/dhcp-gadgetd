@@ -131,7 +131,7 @@ static int dg_extract_usb_path(const char *device_link, char *out_usb_path, size
     return -1;
 }
 
-static int dg_fill_interface_entry(const char *ifname, DgInterfaceEntry *entry) {
+static int dg_fill_interface_entry(const char *ifname, int ifindex_hint, DgInterfaceEntry *entry) {
     char path[PATH_MAX];
     char driver_link[PATH_MAX];
     char device_link[PATH_MAX];
@@ -140,22 +140,33 @@ static int dg_fill_interface_entry(const char *ifname, DgInterfaceEntry *entry) 
     int n;
     unsigned int ifindex;
 
+    if (ifname == NULL || ifname[0] == '\0' || entry == NULL) {
+        dg_log(DG_LOG_DEBUG, "fill iface skipped: invalid args");
+        return -1;
+    }
+
     n = snprintf(path, sizeof(path), "/sys/class/net/%s/device/driver", ifname);
     if (n < 0 || (size_t)n >= sizeof(path)) {
+        dg_log(DG_LOG_DEBUG, "fill iface skipped if=%s reason=driver-path-format", ifname);
         return -1;
     }
     if (dg_readlink_into(path, driver_link, sizeof(driver_link)) != 0) {
+        dg_log(DG_LOG_DEBUG, "fill iface skipped if=%s reason=driver-readlink err=%s", ifname, strerror(errno));
         return -1;
     }
     if (!dg_is_supported_driver(dg_path_basename(driver_link))) {
+        dg_log(DG_LOG_DEBUG, "fill iface skipped if=%s reason=unsupported-driver driver=%s", ifname,
+               dg_path_basename(driver_link));
         return -1;
     }
 
     n = snprintf(path, sizeof(path), "/sys/class/net/%s/device", ifname);
     if (n < 0 || (size_t)n >= sizeof(path)) {
+        dg_log(DG_LOG_DEBUG, "fill iface skipped if=%s reason=device-path-format", ifname);
         return -1;
     }
     if (dg_readlink_into(path, device_link, sizeof(device_link)) != 0) {
+        dg_log(DG_LOG_DEBUG, "fill iface skipped if=%s reason=device-readlink err=%s", ifname, strerror(errno));
         return -1;
     }
     if (dg_extract_usb_path(device_link, usb_path, sizeof(usb_path)) != 0) {
@@ -165,26 +176,36 @@ static int dg_fill_interface_entry(const char *ifname, DgInterfaceEntry *entry) 
 
     n = snprintf(path, sizeof(path), "/sys/class/net/%s/address", ifname);
     if (n < 0 || (size_t)n >= sizeof(path)) {
+        dg_log(DG_LOG_DEBUG, "fill iface skipped if=%s reason=address-path-format", ifname);
         return -1;
     }
     if (dg_read_text_file(path, mac_text, sizeof(mac_text)) != 0) {
+        dg_log(DG_LOG_DEBUG, "fill iface skipped if=%s reason=address-read err=%s", ifname, strerror(errno));
         return -1;
     }
 
-    ifindex = if_nametoindex(ifname);
-    if (ifindex == 0U) {
-        return -1;
+    if (ifindex_hint > 0) {
+        ifindex = (unsigned int)ifindex_hint;
+    } else {
+        ifindex = if_nametoindex(ifname);
+        if (ifindex == 0U) {
+            dg_log(DG_LOG_DEBUG, "fill iface skipped if=%s reason=if_nametoindex err=%s", ifname, strerror(errno));
+            return -1;
+        }
     }
 
     memset(entry, 0, sizeof(*entry));
     entry->ifindex = (int)ifindex;
     if (snprintf(entry->ifname, sizeof(entry->ifname), "%s", ifname) < 0) {
+        dg_log(DG_LOG_DEBUG, "fill iface skipped if=%s reason=ifname-copy", ifname);
         return -1;
     }
     if (snprintf(entry->usb_path, sizeof(entry->usb_path), "%s", usb_path) < 0) {
+        dg_log(DG_LOG_DEBUG, "fill iface skipped if=%s reason=usb-path-copy", ifname);
         return -1;
     }
     if (snprintf(entry->mac, sizeof(entry->mac), "%s", mac_text) < 0) {
+        dg_log(DG_LOG_DEBUG, "fill iface skipped if=%s reason=mac-copy", ifname);
         return -1;
     }
 
@@ -219,7 +240,7 @@ int dg_interface_refresh(void) {
         if (next_count >= DG_MAX_INTERFACES) {
             break;
         }
-        if (dg_fill_interface_entry(de->d_name, &next[next_count]) == 0) {
+        if (dg_fill_interface_entry(de->d_name, 0, &next[next_count]) == 0) {
             next_count++;
         }
     }
@@ -248,7 +269,7 @@ int dg_interface_refresh(void) {
     return 0;
 }
 
-int dg_interface_upsert(const char *ifname) {
+int dg_interface_upsert_with_ifindex(const char *ifname, int ifindex) {
     DgInterfaceEntry entry;
     int by_index;
     int by_name;
@@ -256,7 +277,7 @@ int dg_interface_upsert(const char *ifname) {
     if (ifname == NULL || ifname[0] == '\0') {
         return -1;
     }
-    if (dg_fill_interface_entry(ifname, &entry) != 0) {
+    if (dg_fill_interface_entry(ifname, ifindex, &entry) != 0) {
         return -1;
     }
 
@@ -279,17 +300,18 @@ int dg_interface_upsert(const char *ifname) {
     return 0;
 }
 
-int dg_interface_remove(const char *ifname) {
+int dg_interface_remove(int ifindex) {
     int idx;
-    if (ifname == NULL || ifname[0] == '\0') {
-        return -1;
+
+    if (ifindex > 0) {
+        idx = dg_find_entry_index_by_ifindex(ifindex);
+        if (idx >= 0) {
+            dg_remove_entry_at((size_t)idx);
+            return 0;
+        }
     }
-    idx = dg_find_entry_index_by_name(ifname);
-    if (idx < 0) {
-        return -1;
-    }
-    dg_remove_entry_at((size_t)idx);
-    return 0;
+
+    return -1;
 }
 
 size_t dg_interface_count(void) {

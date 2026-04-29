@@ -14,8 +14,8 @@ typedef struct {
 } DgInterfaceEntry;
 
 int dg_interface_refresh(void);
-int dg_interface_upsert(const char *ifname);
-int dg_interface_remove(const char *ifname);
+int dg_interface_upsert_with_ifindex(const char *ifname, int ifindex);
+int dg_interface_remove(int ifindex);
 size_t dg_interface_count(void);
 const DgInterfaceEntry *dg_interface_get(size_t idx);
 const DgInterfaceEntry *dg_interface_by_ifindex(int ifindex);

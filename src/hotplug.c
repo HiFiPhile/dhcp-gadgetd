@@ -5,6 +5,7 @@
 #include <linux/netlink.h>
 #include <poll.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -121,6 +122,9 @@ int dg_hotplug_next_event(DgHotplugEvent *out_event) {
     while (1) {
         char action[16];
         char ifname[16];
+        char ifindex_text[32];
+        unsigned long ifindex_ul = 0;
+        char *endptr = NULL;
 
         nread = recv(g_hotplug.fd, buf, sizeof(buf), 0);
         if (nread < 0) {
@@ -145,6 +149,14 @@ int dg_hotplug_next_event(DgHotplugEvent *out_event) {
         memset(out_event, 0, sizeof(*out_event));
         if (snprintf(out_event->ifname, sizeof(out_event->ifname), "%s", ifname) < 0) {
             continue;
+        }
+
+        if (dg_msg_get_field(buf, nread, "IFINDEX=", ifindex_text, sizeof(ifindex_text)) == 0) {
+            errno = 0;
+            ifindex_ul = strtoul(ifindex_text, &endptr, 10);
+            if (errno == 0 && endptr != ifindex_text && *endptr == '\0' && ifindex_ul <= (unsigned long)INT32_MAX) {
+                out_event->ifindex = (int)ifindex_ul;
+            }
         }
 
         if (strcmp(action, "add") == 0) {
