@@ -1,13 +1,13 @@
 #include "config.h"
 
 #include <arpa/inet.h>
+#include <ctype.h>
 #include <errno.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include "jsmn.h"
 #include "log.h"
 
 static uint32_t dg_ipv4_to_u32(struct in_addr addr) {
@@ -31,89 +31,16 @@ static int dg_parse_ipv4_string(const char *text, struct in_addr *out_addr) {
     return 0;
 }
 
-static int dg_token_to_text(const char *json, const jsmntok_t *tok, char *out, size_t out_size) {
-    size_t len;
-
-    if (json == NULL || tok == NULL || out == NULL || out_size == 0) {
-        return -1;
-    }
-    if (tok->start < 0 || tok->end < tok->start) {
-        return -1;
-    }
-
-    len = (size_t)(tok->end - tok->start);
-    if (len + 1 > out_size) {
-        return -1;
-    }
-
-    memcpy(out, json + tok->start, len);
-    out[len] = '\0';
-    return 0;
-}
-
-static int dg_token_equals(const char *json, const jsmntok_t *tok, const char *expected) {
-    size_t expected_len;
-    size_t tok_len;
-
-    if (json == NULL || tok == NULL || expected == NULL) {
-        return 0;
-    }
-    if (tok->start < 0 || tok->end < tok->start) {
-        return 0;
-    }
-
-    expected_len = strlen(expected);
-    tok_len = (size_t)(tok->end - tok->start);
-    if (tok_len != expected_len) {
-        return 0;
-    }
-
-    return memcmp(json + tok->start, expected, tok_len) == 0;
-}
-
-static int dg_find_object_key(const char *json, const jsmntok_t *tokens, int token_count, int object_idx,
-                              const char *key) {
-    int i;
-
-    if (json == NULL || tokens == NULL || key == NULL || object_idx < 0 || object_idx >= token_count) {
-        return -1;
-    }
-    if (tokens[object_idx].type != JSMN_OBJECT) {
-        return -1;
-    }
-
-    for (i = object_idx + 1; i + 1 < token_count; i++) {
-        if (tokens[i].parent != object_idx || tokens[i].type != JSMN_STRING) {
-            continue;
-        }
-        if (tokens[i + 1].parent != object_idx) {
-            continue;
-        }
-        if (dg_token_equals(json, &tokens[i], key)) {
-            return i + 1;
-        }
-    }
-
-    return -1;
-}
-
-static int dg_parse_u32_token(const char *json, const jsmntok_t *tok, uint32_t *out_value) {
-    char tmp[32];
+static int dg_parse_u32_string(const char *text, uint32_t *out_value) {
     char *endptr;
     unsigned long value;
 
-    if (json == NULL || tok == NULL || out_value == NULL) {
-        return -1;
-    }
-    if (tok->type != JSMN_PRIMITIVE && tok->type != JSMN_STRING) {
-        return -1;
-    }
-    if (dg_token_to_text(json, tok, tmp, sizeof(tmp)) != 0) {
+    if (text == NULL || out_value == NULL) {
         return -1;
     }
 
     errno = 0;
-    value = strtoul(tmp, &endptr, 10);
+    value = strtoul(text, &endptr, 10);
     if (errno != 0 || *endptr != '\0' || value > UINT_MAX) {
         return -1;
     }
@@ -122,21 +49,8 @@ static int dg_parse_u32_token(const char *json, const jsmntok_t *tok, uint32_t *
     return 0;
 }
 
-static int dg_parse_ipv4_token(const char *json, const jsmntok_t *tok, struct in_addr *out_addr) {
-    char tmp[32];
-
-    if (json == NULL || tok == NULL || out_addr == NULL || tok->type != JSMN_STRING) {
-        return -1;
-    }
-    if (dg_token_to_text(json, tok, tmp, sizeof(tmp)) != 0) {
-        return -1;
-    }
-
-    return dg_parse_ipv4_string(tmp, out_addr);
-}
-
-static int dg_parse_subnet_cidr_token(const char *json, const jsmntok_t *tok, struct in_addr *out_network,
-                                      struct in_addr *out_mask, uint8_t *out_prefix) {
+static int dg_parse_subnet_cidr_string(const char *text, struct in_addr *out_network, struct in_addr *out_mask,
+                                       uint8_t *out_prefix) {
     char tmp[48];
     char *slash;
     char *endptr;
@@ -145,15 +59,14 @@ static int dg_parse_subnet_cidr_token(const char *json, const jsmntok_t *tok, st
     uint32_t mask_u32;
     uint32_t network_u32;
 
-    if (json == NULL || tok == NULL || out_network == NULL || out_mask == NULL || out_prefix == NULL) {
+    if (text == NULL || out_network == NULL || out_mask == NULL || out_prefix == NULL) {
         return -1;
     }
-    if (tok->type != JSMN_STRING) {
+
+    if (strlen(text) >= sizeof(tmp)) {
         return -1;
     }
-    if (dg_token_to_text(json, tok, tmp, sizeof(tmp)) != 0) {
-        return -1;
-    }
+    memcpy(tmp, text, strlen(text) + 1U);
 
     slash = strchr(tmp, '/');
     if (slash == NULL) {
@@ -204,7 +117,7 @@ static int dg_read_file_bytes(const char *path, char **out_buf, size_t *out_len)
         return -1;
     }
 
-    buf = malloc(cap + 1);
+    buf = malloc(cap + 1U);
     if (buf == NULL) {
         fclose(fh);
         return -1;
@@ -249,6 +162,33 @@ static int dg_read_file_bytes(const char *path, char **out_buf, size_t *out_len)
     return 0;
 }
 
+static char *dg_trim(char *text) {
+    char *end;
+
+    if (text == NULL) {
+        return NULL;
+    }
+
+    while (*text != '\0' && isspace((unsigned char)*text)) {
+        text++;
+    }
+
+    if (*text == '\0') {
+        return text;
+    }
+
+    end = text + strlen(text) - 1;
+    while (end >= text && isspace((unsigned char)*end)) {
+        *end = '\0';
+        if (end == text) {
+            break;
+        }
+        end--;
+    }
+
+    return text;
+}
+
 static int dg_static_path_exists(const DgConfig *cfg, const char *path) {
     size_t i;
     for (i = 0; i < cfg->static_lease_count; i++) {
@@ -269,92 +209,65 @@ static int dg_static_ip_exists(const DgConfig *cfg, struct in_addr ip) {
     return 0;
 }
 
-static int dg_parse_dns_array(const char *json, const jsmntok_t *tokens, int token_count, int dns_idx,
-                              DgConfig *cfg) {
-    int i;
-
-    (void)token_count;
-
-    if (tokens[dns_idx].type != JSMN_ARRAY) {
-        return -1;
-    }
+static int dg_parse_dns_list(char *value_text, DgConfig *cfg) {
+    char *saveptr = NULL;
+    char *item;
 
     cfg->dns_count = 0;
-    for (i = dns_idx + 1; i < token_count; i++) {
+    item = strtok_r(value_text, ",", &saveptr);
+    while (item != NULL) {
         struct in_addr dns_ip;
-        if (tokens[i].parent != dns_idx) {
-            continue;
+        char *trimmed = dg_trim(item);
+
+        if (*trimmed != '\0') {
+            if (cfg->dns_count >= DG_MAX_DNS_SERVERS) {
+                return -1;
+            }
+            if (dg_parse_ipv4_string(trimmed, &dns_ip) != 0) {
+                return -1;
+            }
+            cfg->dns[cfg->dns_count++] = dns_ip;
         }
-        if (tokens[i].type != JSMN_STRING) {
-            return -1;
-        }
-        if (cfg->dns_count >= DG_MAX_DNS_SERVERS) {
-            return -1;
-        }
-        if (dg_parse_ipv4_token(json, &tokens[i], &dns_ip) != 0) {
-            return -1;
-        }
-        cfg->dns[cfg->dns_count++] = dns_ip;
+
+        item = strtok_r(NULL, ",", &saveptr);
     }
+
     return 0;
 }
 
-static int dg_parse_static_leases_object(const char *json, const jsmntok_t *tokens, int token_count,
-                                         int static_idx, DgConfig *cfg) {
-    int i;
+static int dg_parse_static_lease(char *value_text, DgConfig *cfg) {
+    char *sep;
+    char *usb_path;
+    char *ip_text;
+    struct in_addr lease_ip;
 
-    if (tokens[static_idx].type != JSMN_OBJECT) {
+    sep = strchr(value_text, '=');
+    if (sep == NULL) {
         return -1;
     }
 
-    cfg->static_lease_count = 0;
+    *sep = '\0';
+    usb_path = dg_trim(value_text);
+    ip_text = dg_trim(sep + 1);
 
-    for (i = static_idx + 1; i + 1 < token_count;) {
-        char key_buf[DG_MAX_PATH_LEN];
-        struct in_addr lease_ip;
-        int value_idx;
-
-        if (tokens[i].parent != static_idx) {
-            i++;
-            continue;
-        }
-        if (tokens[i].type != JSMN_STRING) {
-            return -1;
-        }
-        value_idx = i + 1;
-        if (tokens[value_idx].parent != static_idx || tokens[value_idx].type != JSMN_STRING) {
-            return -1;
-        }
-
-        if (dg_token_to_text(json, &tokens[i], key_buf, sizeof(key_buf)) != 0 || key_buf[0] == '\0') {
-            return -1;
-        }
-        if (dg_parse_ipv4_token(json, &tokens[value_idx], &lease_ip) != 0) {
-            return -1;
-        }
-        if (!dg_ipv4_in_subnet(lease_ip, cfg->subnet_network, cfg->subnet_mask)) {
-            return -1;
-        }
-        if (dg_static_path_exists(cfg, key_buf) || dg_static_ip_exists(cfg, lease_ip)) {
-            return -1;
-        }
-        if (cfg->static_lease_count >= DG_MAX_STATIC_LEASES) {
-            return -1;
-        }
-
-        {
-            size_t dst_cap = sizeof(cfg->static_leases[cfg->static_lease_count].usb_path);
-            size_t key_len = strlen(key_buf);
-            if (key_len + 1U > dst_cap) {
-                return -1;
-            }
-            memcpy(cfg->static_leases[cfg->static_lease_count].usb_path, key_buf, key_len + 1U);
-        }
-        cfg->static_leases[cfg->static_lease_count].ip = lease_ip;
-        cfg->static_lease_count++;
-
-        i = value_idx + 1;
+    if (*usb_path == '\0' || *ip_text == '\0') {
+        return -1;
     }
+    if (dg_parse_ipv4_string(ip_text, &lease_ip) != 0) {
+        return -1;
+    }
+    if (dg_static_path_exists(cfg, usb_path) || dg_static_ip_exists(cfg, lease_ip)) {
+        return -1;
+    }
+    if (cfg->static_lease_count >= DG_MAX_STATIC_LEASES) {
+        return -1;
+    }
+    if (snprintf(cfg->static_leases[cfg->static_lease_count].usb_path,
+                 sizeof(cfg->static_leases[cfg->static_lease_count].usb_path), "%s", usb_path) < 0) {
+        return -1;
+    }
+    cfg->static_leases[cfg->static_lease_count].ip = lease_ip;
+    cfg->static_lease_count++;
 
     return 0;
 }
@@ -389,164 +302,181 @@ static int dg_validate_collisions(const DgConfig *cfg) {
     return 0;
 }
 
-static int dg_parse_config_json(const char *json, size_t json_len, DgConfig *out_cfg) {
-    jsmntok_t *tokens = NULL;
-    size_t token_cap = 256;
-    int token_count;
-    int root_idx = 0;
-    int subnet_idx;
-    int pool_idx;
-    int start_idx;
-    int end_idx;
-    int server_ip_idx;
-    int router_idx;
-    int lease_time_idx;
-    int dns_idx;
-    int static_idx;
-    jsmn_parser parser;
+static int dg_validate_network_ranges(const DgConfig *cfg) {
+    size_t i;
 
-    while (1) {
-        jsmn_init(&parser);
-        tokens = calloc(token_cap, sizeof(*tokens));
-        if (tokens == NULL) {
+    if (!dg_ipv4_in_subnet(cfg->pool.start, cfg->subnet_network, cfg->subnet_mask) ||
+        !dg_ipv4_in_subnet(cfg->pool.end, cfg->subnet_network, cfg->subnet_mask) ||
+        dg_ipv4_to_u32(cfg->pool.end) < dg_ipv4_to_u32(cfg->pool.start)) {
+        return -1;
+    }
+
+    if (!dg_ipv4_in_subnet(cfg->server_ip, cfg->subnet_network, cfg->subnet_mask)) {
+        return -1;
+    }
+
+    if (cfg->has_router && !dg_ipv4_in_subnet(cfg->router, cfg->subnet_network, cfg->subnet_mask)) {
+        return -1;
+    }
+
+    for (i = 0; i < cfg->static_lease_count; i++) {
+        if (!dg_ipv4_in_subnet(cfg->static_leases[i].ip, cfg->subnet_network, cfg->subnet_mask)) {
             return -1;
         }
+    }
 
-        token_count = jsmn_parse(&parser, json, json_len, tokens, (unsigned int)token_cap);
-        if (token_count == JSMN_ERROR_NOMEM) {
-            free(tokens);
-            tokens = NULL;
-            if (token_cap > (SIZE_MAX / 2U)) {
-                return -1;
-            }
-            token_cap *= 2U;
+    return 0;
+}
+
+static int dg_parse_config_text(char *text, DgConfig *cfg) {
+    char *saveptr = NULL;
+    char *line;
+    size_t line_no = 0;
+    int have_subnet = 0;
+    int have_pool_start = 0;
+    int have_pool_end = 0;
+    int have_server_ip = 0;
+
+    if (text == NULL || cfg == NULL) {
+        return -1;
+    }
+
+    cfg->has_router = 0;
+    cfg->dns_count = 0;
+    cfg->static_lease_count = 0;
+
+    line = strtok_r(text, "\n", &saveptr);
+    while (line != NULL) {
+        char *trimmed_line;
+        char *sep;
+        char *key;
+        char *value;
+
+        line_no++;
+        trimmed_line = dg_trim(line);
+
+        if (*trimmed_line == '\0' || *trimmed_line == '#' || *trimmed_line == ';') {
+            line = strtok_r(NULL, "\n", &saveptr);
             continue;
         }
-        break;
-    }
 
-    if (token_count <= 0 || tokens[root_idx].type != JSMN_OBJECT) {
-        free(tokens);
-        return -1;
-    }
+        if (trimmed_line[0] == '/' && trimmed_line[1] == '/') {
+            line = strtok_r(NULL, "\n", &saveptr);
+            continue;
+        }
 
-    subnet_idx = dg_find_object_key(json, tokens, token_count, root_idx, "subnet");
-    pool_idx = dg_find_object_key(json, tokens, token_count, root_idx, "pool");
-    if (subnet_idx < 0 || pool_idx < 0) {
-        free(tokens);
-        return -1;
-    }
-    if (dg_parse_subnet_cidr_token(json, &tokens[subnet_idx], &out_cfg->subnet_network, &out_cfg->subnet_mask,
-                                   &out_cfg->subnet_prefix) != 0) {
-        free(tokens);
-        return -1;
-    }
-
-    if (tokens[pool_idx].type != JSMN_OBJECT) {
-        free(tokens);
-        return -1;
-    }
-    start_idx = dg_find_object_key(json, tokens, token_count, pool_idx, "start");
-    end_idx = dg_find_object_key(json, tokens, token_count, pool_idx, "end");
-    if (start_idx < 0 || end_idx < 0) {
-        free(tokens);
-        return -1;
-    }
-    if (dg_parse_ipv4_token(json, &tokens[start_idx], &out_cfg->pool.start) != 0 ||
-        dg_parse_ipv4_token(json, &tokens[end_idx], &out_cfg->pool.end) != 0) {
-        free(tokens);
-        return -1;
-    }
-
-    if (!dg_ipv4_in_subnet(out_cfg->pool.start, out_cfg->subnet_network, out_cfg->subnet_mask) ||
-        !dg_ipv4_in_subnet(out_cfg->pool.end, out_cfg->subnet_network, out_cfg->subnet_mask) ||
-        dg_ipv4_to_u32(out_cfg->pool.end) < dg_ipv4_to_u32(out_cfg->pool.start)) {
-        free(tokens);
-        return -1;
-    }
-
-    server_ip_idx = dg_find_object_key(json, tokens, token_count, root_idx, "server_ip");
-    if (server_ip_idx >= 0) {
-        if (dg_parse_ipv4_token(json, &tokens[server_ip_idx], &out_cfg->server_ip) != 0) {
-            free(tokens);
+        sep = strchr(trimmed_line, '=');
+        if (sep == NULL) {
+            dg_log(DG_LOG_ERROR, "config parse error at line %zu: expected key=value", line_no);
             return -1;
         }
-    } else {
-        uint32_t network_u32 = dg_ipv4_to_u32(out_cfg->subnet_network);
+
+        *sep = '\0';
+        key = dg_trim(trimmed_line);
+        value = dg_trim(sep + 1);
+
+        if (*key == '\0' || *value == '\0') {
+            dg_log(DG_LOG_ERROR, "config parse error at line %zu: empty key/value", line_no);
+            return -1;
+        }
+
+        if (strcmp(key, "subnet") == 0) {
+            if (dg_parse_subnet_cidr_string(value, &cfg->subnet_network, &cfg->subnet_mask, &cfg->subnet_prefix) != 0) {
+                dg_log(DG_LOG_ERROR, "config parse error at line %zu: invalid subnet", line_no);
+                return -1;
+            }
+            have_subnet = 1;
+        } else if (strcmp(key, "server_ip") == 0) {
+            if (dg_parse_ipv4_string(value, &cfg->server_ip) != 0) {
+                dg_log(DG_LOG_ERROR, "config parse error at line %zu: invalid server_ip", line_no);
+                return -1;
+            }
+            have_server_ip = 1;
+        } else if (strcmp(key, "router") == 0) {
+            if (dg_parse_ipv4_string(value, &cfg->router) != 0) {
+                dg_log(DG_LOG_ERROR, "config parse error at line %zu: invalid router", line_no);
+                return -1;
+            }
+            cfg->has_router = 1;
+        } else if (strcmp(key, "lease_time") == 0) {
+            if (dg_parse_u32_string(value, &cfg->pool.lease_seconds) != 0 || cfg->pool.lease_seconds == 0U) {
+                dg_log(DG_LOG_ERROR, "config parse error at line %zu: invalid lease_time", line_no);
+                return -1;
+            }
+        } else if (strcmp(key, "pool_start") == 0) {
+            if (dg_parse_ipv4_string(value, &cfg->pool.start) != 0) {
+                dg_log(DG_LOG_ERROR, "config parse error at line %zu: invalid pool_start", line_no);
+                return -1;
+            }
+            have_pool_start = 1;
+        } else if (strcmp(key, "pool_end") == 0) {
+            if (dg_parse_ipv4_string(value, &cfg->pool.end) != 0) {
+                dg_log(DG_LOG_ERROR, "config parse error at line %zu: invalid pool_end", line_no);
+                return -1;
+            }
+            have_pool_end = 1;
+        } else if (strcmp(key, "dns") == 0) {
+            if (dg_parse_dns_list(value, cfg) != 0) {
+                dg_log(DG_LOG_ERROR, "config parse error at line %zu: invalid dns list", line_no);
+                return -1;
+            }
+        } else if (strcmp(key, "static_lease") == 0) {
+            if (dg_parse_static_lease(value, cfg) != 0) {
+                dg_log(DG_LOG_ERROR, "config parse error at line %zu: invalid static_lease entry", line_no);
+                return -1;
+            }
+        } else {
+            dg_log(DG_LOG_ERROR, "config parse error at line %zu: unknown key '%s'", line_no, key);
+            return -1;
+        }
+
+        line = strtok_r(NULL, "\n", &saveptr);
+    }
+
+    if (!have_subnet || !have_pool_start || !have_pool_end) {
+        dg_log(DG_LOG_ERROR, "config parse error: required keys are subnet, pool_start, pool_end");
+        return -1;
+    }
+
+    if (!have_server_ip) {
+        uint32_t network_u32 = dg_ipv4_to_u32(cfg->subnet_network);
         uint32_t first_host = network_u32;
-        if (out_cfg->subnet_prefix < 32U) {
+        if (cfg->subnet_prefix < 32U) {
             first_host = network_u32 + 1U;
         }
-        out_cfg->server_ip = dg_u32_to_ipv4(first_host);
+        cfg->server_ip = dg_u32_to_ipv4(first_host);
     }
 
-    if (!dg_ipv4_in_subnet(out_cfg->server_ip, out_cfg->subnet_network, out_cfg->subnet_mask)) {
-        free(tokens);
+    if (dg_validate_network_ranges(cfg) != 0) {
+        dg_log(DG_LOG_ERROR, "config validation failed: network values out of subnet/range");
+        return -1;
+    }
+    if (dg_validate_collisions(cfg) != 0) {
+        dg_log(DG_LOG_ERROR, "config validation failed: server/router/static/pool collision");
         return -1;
     }
 
-    out_cfg->has_router = 0;
-    router_idx = dg_find_object_key(json, tokens, token_count, root_idx, "router");
-    if (router_idx >= 0) {
-        if (dg_parse_ipv4_token(json, &tokens[router_idx], &out_cfg->router) != 0 ||
-            !dg_ipv4_in_subnet(out_cfg->router, out_cfg->subnet_network, out_cfg->subnet_mask)) {
-            free(tokens);
-            return -1;
-        }
-        out_cfg->has_router = 1;
-    }
-
-    lease_time_idx = dg_find_object_key(json, tokens, token_count, root_idx, "lease_time");
-    if (lease_time_idx >= 0) {
-        if (dg_parse_u32_token(json, &tokens[lease_time_idx], &out_cfg->pool.lease_seconds) != 0 ||
-            out_cfg->pool.lease_seconds == 0U) {
-            free(tokens);
-            return -1;
-        }
-    }
-
-    out_cfg->dns_count = 0;
-    dns_idx = dg_find_object_key(json, tokens, token_count, root_idx, "dns");
-    if (dns_idx >= 0 && dg_parse_dns_array(json, tokens, token_count, dns_idx, out_cfg) != 0) {
-        free(tokens);
-        return -1;
-    }
-
-    static_idx = dg_find_object_key(json, tokens, token_count, root_idx, "static_leases");
-    if (static_idx >= 0) {
-        if (dg_parse_static_leases_object(json, tokens, token_count, static_idx, out_cfg) != 0) {
-            free(tokens);
-            return -1;
-        }
-    }
-
-    if (dg_validate_collisions(out_cfg) != 0) {
-        free(tokens);
-        return -1;
-    }
-
-    free(tokens);
     return 0;
 }
 
 void dg_config_set_defaults(DgConfig *out_cfg) {
     memset(out_cfg, 0, sizeof(*out_cfg));
 
-    dg_parse_ipv4_string("192.168.7.1", &out_cfg->server_ip);
-    dg_parse_ipv4_string("192.168.7.0", &out_cfg->subnet_network);
+    dg_parse_ipv4_string("192.168.8.1", &out_cfg->server_ip);
+    dg_parse_ipv4_string("192.168.8.0", &out_cfg->subnet_network);
     dg_parse_ipv4_string("255.255.255.0", &out_cfg->subnet_mask);
     out_cfg->subnet_prefix = 24;
     out_cfg->has_router = 0;
-    dg_parse_ipv4_string("192.168.7.100", &out_cfg->pool.start);
-    dg_parse_ipv4_string("192.168.7.200", &out_cfg->pool.end);
+    dg_parse_ipv4_string("192.168.8.100", &out_cfg->pool.start);
+    dg_parse_ipv4_string("192.168.8.200", &out_cfg->pool.end);
     out_cfg->pool.lease_seconds = 86400;
     out_cfg->dns_count = 0;
     out_cfg->static_lease_count = 0;
 }
 
 int dg_config_load(const char *path, DgConfig *out_cfg) {
-    char *json = NULL;
-    size_t json_len = 0;
+    char *text = NULL;
+    size_t text_len = 0;
     size_t i;
 
     if (path == NULL || out_cfg == NULL) {
@@ -558,24 +488,24 @@ int dg_config_load(const char *path, DgConfig *out_cfg) {
     strncpy(out_cfg->config_path, path, sizeof(out_cfg->config_path) - 1U);
     out_cfg->config_path[sizeof(out_cfg->config_path) - 1U] = '\0';
 
-    if (dg_read_file_bytes(path, &json, &json_len) != 0) {
+    if (dg_read_file_bytes(path, &text, &text_len) != 0) {
         dg_log(DG_LOG_ERROR, "config open failed for %s: %s", path, strerror(errno));
         return -1;
     }
 
-    if (json_len == 0U) {
+    if (text_len == 0U) {
         dg_log(DG_LOG_ERROR, "config file is empty: %s", path);
-        free(json);
+        free(text);
         return -1;
     }
 
-    if (dg_parse_config_json(json, json_len, out_cfg) != 0) {
+    if (dg_parse_config_text(text, out_cfg) != 0) {
         dg_log(DG_LOG_ERROR, "config parse/validation failed: %s", path);
-        free(json);
+        free(text);
         return -1;
     }
 
-    free(json);
+    free(text);
     dg_log(DG_LOG_INFO, "config loaded: lease_time=%u static_leases=%zu dns=%zu", out_cfg->pool.lease_seconds,
            out_cfg->static_lease_count, out_cfg->dns_count);
 
@@ -585,7 +515,8 @@ int dg_config_load(const char *path, DgConfig *out_cfg) {
             strncpy(ip_text, "<invalid>", sizeof(ip_text) - 1U);
             ip_text[sizeof(ip_text) - 1U] = '\0';
         }
-        dg_log(DG_LOG_DEBUG, "static lease configured usb_path=%s ip=%s", out_cfg->static_leases[i].usb_path, ip_text);
+        dg_log(DG_LOG_DEBUG, "static lease configured usb_path=%s ip=%s", out_cfg->static_leases[i].usb_path,
+               ip_text);
     }
 
     return 0;

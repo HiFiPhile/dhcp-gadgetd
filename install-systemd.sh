@@ -29,8 +29,8 @@ if [[ ! -f "${SCRIPT_DIR}/dhcp-gadget.env" ]]; then
   echo "dhcp-gadget.env not found next to installer script." >&2
   exit 1
 fi
-if [[ ! -f "${SCRIPT_DIR}/config.example.json" ]]; then
-  echo "config.example.json not found next to installer script." >&2
+if [[ ! -f "${SCRIPT_DIR}/config.example.conf" ]]; then
+  echo "config.example.conf not found next to installer script." >&2
   exit 1
 fi
 
@@ -39,11 +39,11 @@ install -d -m 0755 "${CONFIG_DIR}"
 
 install -m 0755 "${SCRIPT_DIR}/${BINARY_NAME}" "${APP_DIR}/${BINARY_NAME}"
 
-if [[ ! -f "${CONFIG_DIR}/config.json" ]]; then
-  install -m 0644 "${SCRIPT_DIR}/config.example.json" "${CONFIG_DIR}/config.json"
-  echo "Created default config at ${CONFIG_DIR}/config.json"
+if [[ ! -f "${CONFIG_DIR}/config.conf" ]]; then
+  install -m 0644 "${SCRIPT_DIR}/config.example.conf" "${CONFIG_DIR}/config.conf"
+  echo "Created default config at ${CONFIG_DIR}/config.conf"
 else
-  echo "Keeping existing config at ${CONFIG_DIR}/config.json"
+  echo "Keeping existing config at ${CONFIG_DIR}/config.conf"
 fi
 
 if [[ ! -f "${ENV_FILE}" ]]; then
@@ -59,6 +59,6 @@ systemctl daemon-reload
 systemctl enable --now "${SERVICE_NAME}"
 
 echo "Installed and started ${SERVICE_NAME}"
-echo "Edit config: ${CONFIG_DIR}/config.json"
+echo "Edit config: ${CONFIG_DIR}/config.conf"
 echo "Service env: ${ENV_FILE}"
 echo "Check status: systemctl status ${SERVICE_NAME}"

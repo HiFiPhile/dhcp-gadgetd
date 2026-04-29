@@ -22,7 +22,7 @@ This builds dhcp-gadgetd in the repository root.
 ## Run
 
 ```bash
-sudo ./dhcp-gadgetd --config config.example.json --log-level debug
+sudo ./dhcp-gadgetd --config config.example.conf --log-level debug
 ```
 
 Supported log levels are debug, info, warn, and error.
@@ -38,7 +38,7 @@ sudo ./install-systemd.sh
 This installs:
 
 - daemon binary in /opt/dhcp-gadget/dhcp-gadgetd
-- default config in /etc/dhcp-gadget/config.json (only if missing)
+- default config in /etc/dhcp-gadget/config.conf (only if missing)
 - service env file in /etc/default/dhcp-gadget from dhcp-gadget.env (only if missing)
 - unit file in /etc/systemd/system/dhcp-gadget.service
 
@@ -76,20 +76,24 @@ sudo ./uninstall-systemd.sh --purge
 
 ## Configuration format
 
-```json
-{
-  "subnet": "192.168.7.0/24",
-  "router": "192.168.7.1",
-  "server_ip": "192.168.7.1",
-  "lease_time": 86400,
-  "pool": {"start": "192.168.7.100", "end": "192.168.7.200"},
-  "dns": ["1.1.1.1", "8.8.8.8"],
-  "static_leases": {
-    "1-2:1.0": "192.168.7.10"
-  }
-}
+```ini
+# Required keys
+subnet=192.168.8.0/24
+pool_start=192.168.8.100
+pool_end=192.168.8.200
+
+# Optional keys
+server_ip=192.168.8.1
+router=192.168.8.1
+lease_time=86400
+dns=1.1.1.1,8.8.8.8
+
+# Repeatable key
+static_lease=1-2:1.0=192.168.8.10
+static_lease=1-3:1.0=192.168.8.11
 ```
 
+Use key=value lines, one per setting. Empty lines and lines starting with #, ;, or // are ignored.
 router is optional. If omitted, the DHCP router option is not sent.
 dns is optional. If omitted, the DHCP DNS option is not sent.
 

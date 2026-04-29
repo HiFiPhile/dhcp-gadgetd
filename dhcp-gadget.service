@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 EnvironmentFile=-/etc/default/dhcp-gadget
 
-Environment=CONFIG=/etc/dhcp-gadget/config.json
+Environment=CONFIG=/etc/dhcp-gadget/config.conf
 Environment=LOG_LEVEL=info
 ExecStart=/opt/dhcp-gadget/dhcp-gadgetd --config ${CONFIG} --log-level ${LOG_LEVEL}
 
