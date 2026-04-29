@@ -103,3 +103,26 @@ Replies are sent with raw socket `sendto()` on the selected egress interface.
 - Interface hotplug tracking is udev-based and requires `pyudev`.
 - Run with root privileges (or equivalent capabilities) because packet sniffing/sending is raw.
 - USB path format comes from sysfs resolution for each attached interface.
+
+## C Rewrite Bootstrap
+
+An initial C daemon scaffold is now present for the rewrite effort.
+
+Build:
+
+```bash
+make
+```
+
+Run:
+
+```bash
+sudo ./dhcp-gadgetd --config config.example.json --log-level debug
+```
+
+Current status of the C daemon:
+
+- module boundaries and server loop are in place
+- signal handling and logging are in place
+- config parser is bootstrap-only (loads defaults and validates file readability)
+- DHCP wire parsing/building and hotplug integrations are stubbed for next implementation phases
