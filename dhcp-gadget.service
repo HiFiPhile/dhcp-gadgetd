@@ -1,5 +1,5 @@
 [Unit]
-Description=DHCP Server for USB Gadget Bridge
+Description=DHCP Gadget Daemon
 After=network-online.target
 Wants=network-online.target
 
@@ -8,14 +8,15 @@ Type=simple
 EnvironmentFile=-/etc/default/dhcp-gadget
 
 Environment=CONFIG=/etc/dhcp-gadget/config.json
-Environment=LOG_LEVEL=INFO
-ExecStart=/usr/bin/python3 /opt/dhcp-gadget/dhcp_server.py --config ${CONFIG} --log-level ${LOG_LEVEL}
+Environment=LOG_LEVEL=info
+ExecStart=/opt/dhcp-gadget/dhcp-gadgetd --config ${CONFIG} --log-level ${LOG_LEVEL}
 
 # Run with only the network capabilities needed for raw DHCP handling.
 CapabilityBoundingSet=CAP_NET_RAW CAP_NET_BIND_SERVICE
 AmbientCapabilities=CAP_NET_RAW CAP_NET_BIND_SERVICE
 
 # Basic service sandboxing.
+NoNewPrivileges=true
 DynamicUser=true
 PrivateDevices=true
 ProtectHome=true

@@ -6,6 +6,7 @@ APP_DIR="/opt/dhcp-gadget"
 CONFIG_DIR="/etc/dhcp-gadget"
 ENV_FILE="/etc/default/dhcp-gadget"
 SYSTEMD_UNIT="/etc/systemd/system/${SERVICE_NAME}"
+BINARY_NAME="dhcp-gadgetd"
 PURGE="${1:-}"
 
 if [[ "${EUID}" -ne 0 ]]; then
@@ -22,7 +23,7 @@ rm -f "${SYSTEMD_UNIT}"
 systemctl daemon-reload
 systemctl reset-failed || true
 
-rm -f "${APP_DIR}/dhcp_server.py" "${APP_DIR}/requirements.txt"
+rm -f "${APP_DIR}/${BINARY_NAME}"
 rmdir "${APP_DIR}" 2>/dev/null || true
 
 if [[ "${PURGE}" == "--purge" ]]; then

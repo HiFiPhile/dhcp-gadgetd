@@ -6,6 +6,7 @@ APP_DIR="/opt/dhcp-gadget"
 CONFIG_DIR="/etc/dhcp-gadget"
 ENV_FILE="/etc/default/dhcp-gadget"
 SYSTEMD_UNIT="/etc/systemd/system/${SERVICE_NAME}"
+BINARY_NAME="dhcp-gadgetd"
 
 if [[ "${EUID}" -ne 0 ]]; then
   echo "This script must be run as root." >&2
@@ -15,12 +16,17 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-if [[ ! -f "${SCRIPT_DIR}/dhcp_server.py" ]]; then
-  echo "dhcp_server.py not found next to installer script." >&2
+if [[ ! -f "${SCRIPT_DIR}/${BINARY_NAME}" ]]; then
+  echo "${BINARY_NAME} not found next to installer script." >&2
+  echo "Build first: make" >&2
   exit 1
 fi
 if [[ ! -f "${SCRIPT_DIR}/dhcp-gadget.service" ]]; then
   echo "dhcp-gadget.service not found next to installer script." >&2
+  exit 1
+fi
+if [[ ! -f "${SCRIPT_DIR}/dhcp-gadget.env" ]]; then
+  echo "dhcp-gadget.env not found next to installer script." >&2
   exit 1
 fi
 if [[ ! -f "${SCRIPT_DIR}/config.example.json" ]]; then
@@ -31,10 +37,7 @@ fi
 install -d -m 0755 "${APP_DIR}"
 install -d -m 0755 "${CONFIG_DIR}"
 
-install -m 0644 "${SCRIPT_DIR}/dhcp_server.py" "${APP_DIR}/dhcp_server.py"
-if [[ -f "${SCRIPT_DIR}/requirements.txt" ]]; then
-  install -m 0644 "${SCRIPT_DIR}/requirements.txt" "${APP_DIR}/requirements.txt"
-fi
+install -m 0755 "${SCRIPT_DIR}/${BINARY_NAME}" "${APP_DIR}/${BINARY_NAME}"
 
 if [[ ! -f "${CONFIG_DIR}/config.json" ]]; then
   install -m 0644 "${SCRIPT_DIR}/config.example.json" "${CONFIG_DIR}/config.json"
@@ -44,12 +47,7 @@ else
 fi
 
 if [[ ! -f "${ENV_FILE}" ]]; then
-  cat > "${ENV_FILE}" <<'EOF'
-# Environment overrides for dhcp-gadget.service
-
-CONFIG=/etc/dhcp-gadget/config.json
-LOG_LEVEL=INFO
-EOF
+  install -m 0644 "${SCRIPT_DIR}/dhcp-gadget.env" "${ENV_FILE}"
   echo "Created ${ENV_FILE}"
 else
   echo "Keeping existing ${ENV_FILE}"
