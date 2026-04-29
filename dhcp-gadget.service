@@ -27,9 +27,5 @@ MemoryDenyWriteExecute=true
 Restart=always
 RestartSec=1
 
-# Stop probing cache
-Environment=XDG_CACHE_HOME=
-Environment=XDG_CONFIG_HOME=
-
 [Install]
 WantedBy=multi-user.target

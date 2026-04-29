@@ -19,26 +19,12 @@ import re
 import select
 import signal
 import socket
+import struct
 import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
-
-try:
-    from scapy.all import (
-        BOOTP,
-        DHCP,
-        Ether,
-        IP,
-        UDP,
-        conf,
-        get_if_hwaddr,
-    )
-except ImportError as exc:  # pragma: no cover - import guard
-    raise SystemExit(
-        "scapy is required. Install dependencies with: pip install -r requirements.txt"
-    ) from exc
 
 try:
     import pyudev
@@ -53,10 +39,13 @@ USB_IFACE_RE = re.compile(r"^\d+-\d+(?:\.\d+)*:\d+\.\d+$")
 USB_DEVICE_RE = re.compile(r"^\d+-\d+(?:\.\d+)*$")
 ETH_P_ALL = 0x0003
 ETH_P_IP = 0x0800
+ETH_P_VLAN = 0x8100
+ETH_P_QINQ = 0x88A8
 SUPPORTED_USB_NET_DRIVERS = {"cdc_ether", "cdc_eem"}
 PACKET_OUTGOING = getattr(socket, "PACKET_OUTGOING", 4)
 SOL_PACKET = getattr(socket, "SOL_PACKET", 263)
 PACKET_IGNORE_OUTGOING_OPT = getattr(socket, "PACKET_IGNORE_OUTGOING", 23)
+DHCP_MAGIC_COOKIE = b"\x63\x82\x53\x63"
 
 
 @dataclass
@@ -260,12 +249,6 @@ class GadgetDhcpServer:
 
         return None
 
-    def _get_option(self, options: list[Any], key: str) -> Any:
-        for option in options:
-            if isinstance(option, tuple) and option[0] == key:
-                return option[1]
-        return None
-
     def _normalize_msg_type(self, msg_type: Any) -> Optional[str]:
         mapping = {
             1: "discover",
@@ -298,28 +281,14 @@ class GadgetDhcpServer:
 
         return None
 
-    def _is_client_dhcp_packet(self, packet: Any) -> bool:
-        if not (packet.haslayer(DHCP) and packet.haslayer(BOOTP) and packet.haslayer(UDP)):
-            return False
-
-        udp = packet[UDP]
-        if int(udp.sport) != 68 or int(udp.dport) != 67:
-            return False
-
-        bootp = packet[BOOTP]
-        if int(bootp.op) != 1:
-            return False
-
-        return True
-
     def _is_likely_dhcp_client_frame(self, frame: bytes) -> bool:
-        # Fast path filter to avoid full Scapy decode on unrelated traffic.
+        # Fast path filter to avoid full decode on unrelated traffic.
         if len(frame) < 14 + 20 + 8 + 1:
             return False
 
         eth_type = (frame[12] << 8) | frame[13]
         ip_off = 14
-        if eth_type in (0x8100, 0x88A8):
+        if eth_type in (ETH_P_VLAN, ETH_P_QINQ):
             if len(frame) < 18 + 20 + 8 + 1:
                 return False
             eth_type = (frame[16] << 8) | frame[17]
@@ -358,25 +327,199 @@ class GadgetDhcpServer:
 
         return True
 
-    def _mac_from_packet(self, packet: Any) -> str:
-        raw = bytes(packet[BOOTP].chaddr[:6])
-        return ":".join(f"{b:02x}" for b in raw)
+    @staticmethod
+    def _mac_bytes_to_str(mac: bytes) -> str:
+        return ":".join(f"{b:02x}" for b in mac)
 
-    def _build_common_options(self) -> list[Any]:
-        options: list[Any] = [
-            ("server_id", self.server_ip),
-            ("subnet_mask", str(self.network.netmask)),
-            ("lease_time", self.lease_seconds),
+    @staticmethod
+    def _mac_str_to_bytes(mac: str) -> bytes:
+        return bytes(int(part, 16) for part in mac.split(":"))
+
+    @staticmethod
+    def _ipv4_checksum(header: bytes) -> int:
+        if len(header) % 2:
+            header += b"\x00"
+        words = struct.unpack(f"!{len(header) // 2}H", header)
+        total = sum(words)
+        while total > 0xFFFF:
+            total = (total & 0xFFFF) + (total >> 16)
+        return (~total) & 0xFFFF
+
+    @staticmethod
+    def _encode_option(code: int, value: bytes) -> bytes:
+        return bytes((code, len(value))) + value
+
+    def _parse_dhcp_request(self, frame: bytes) -> Optional[dict[str, Any]]:
+        if not self._is_likely_dhcp_client_frame(frame):
+            return None
+
+        eth_type = (frame[12] << 8) | frame[13]
+        ip_off = 14
+        if eth_type in (ETH_P_VLAN, ETH_P_QINQ):
+            eth_type = (frame[16] << 8) | frame[17]
+            ip_off = 18
+
+        if eth_type != ETH_P_IP:
+            return None
+
+        ip_hlen = (frame[ip_off] & 0x0F) * 4
+        udp_off = ip_off + ip_hlen
+        udp_len = (frame[udp_off + 4] << 8) | frame[udp_off + 5]
+        if udp_len < 8:
+            return None
+
+        udp_payload_end = udp_off + udp_len
+        if udp_payload_end > len(frame):
+            udp_payload_end = len(frame)
+
+        bootp = frame[udp_off + 8 : udp_payload_end]
+        if len(bootp) < 240:
+            return None
+
+        if bootp[0] != 1:  # BOOTREQUEST
+            return None
+
+        if bootp[236:240] != DHCP_MAGIC_COOKIE:
+            return None
+
+        htype = int(bootp[1])
+        hlen = int(bootp[2])
+        if htype != 1 or hlen < 6:
+            return None
+
+        xid = struct.unpack("!I", bootp[4:8])[0]
+        flags = struct.unpack("!H", bootp[10:12])[0]
+        chaddr_field = bootp[28:44]
+        client_mac = self._mac_bytes_to_str(chaddr_field[:6])
+
+        msg_raw: Optional[int] = None
+        requested_ip: Optional[str] = None
+        options = bootp[240:]
+        idx = 0
+        while idx < len(options):
+            code = options[idx]
+            if code == 0:
+                idx += 1
+                continue
+            if code == 255:
+                break
+            if idx + 1 >= len(options):
+                break
+            opt_len = options[idx + 1]
+            start = idx + 2
+            end = start + opt_len
+            if end > len(options):
+                break
+            value = options[start:end]
+            if code == 53 and opt_len >= 1:
+                msg_raw = int(value[0])
+            elif code == 50 and opt_len == 4:
+                requested_ip = socket.inet_ntoa(value)
+            idx = end
+
+        msg_type = self._normalize_msg_type(msg_raw)
+        if msg_type is None:
+            return None
+
+        return {
+            "xid": xid,
+            "flags": flags,
+            "htype": htype,
+            "hlen": hlen,
+            "chaddr_field": chaddr_field,
+            "client_mac": client_mac,
+            "msg_type": msg_type,
+            "requested_ip": requested_ip,
+        }
+
+    def _build_common_options(self) -> list[bytes]:
+        options = [
+            self._encode_option(54, socket.inet_aton(self.server_ip)),
+            self._encode_option(1, socket.inet_aton(str(self.network.netmask))),
+            self._encode_option(51, struct.pack("!I", int(self.lease_seconds))),
         ]
         if self.router:
-            options.append(("router", self.router))
+            options.append(self._encode_option(3, socket.inet_aton(self.router)))
         if self.dns_servers:
-            options.append(("name_server", self.dns_servers))
+            dns_blob = b"".join(socket.inet_aton(ip) for ip in self.dns_servers)
+            options.append(self._encode_option(6, dns_blob))
         return options
 
-    def _send_raw_frame(self, egress_ifname: str, frame: Any, tag: str) -> bool:
+    def _build_reply_frame(
+        self,
+        request: dict[str, Any],
+        egress_ifname: str,
+        yiaddr: str,
+        dhcp_options: list[bytes],
+    ) -> Optional[bytes]:
+        server_mac_str = self.iface_to_mac.get(egress_ifname) or self.resolve_interface_mac(egress_ifname)
+        if not server_mac_str:
+            LOG.warning("Cannot resolve interface MAC for iface=%s", egress_ifname)
+            return None
+
+        server_mac = self._mac_str_to_bytes(server_mac_str)
+        if len(server_mac) != 6:
+            LOG.warning("Invalid interface MAC for iface=%s mac=%s", egress_ifname, server_mac_str)
+            return None
+
+        bootp_fixed = struct.pack(
+            "!BBBBIHH4s4s4s4s16s64s128s",
+            2,
+            int(request["htype"]),
+            int(request["hlen"]),
+            0,
+            int(request["xid"]),
+            0,
+            int(request["flags"]),
+            b"\x00\x00\x00\x00",
+            socket.inet_aton(yiaddr),
+            socket.inet_aton(self.server_ip),
+            b"\x00\x00\x00\x00",
+            bytes(request["chaddr_field"]),
+            b"\x00" * 64,
+            b"\x00" * 128,
+        )
+        bootp_payload = bootp_fixed + DHCP_MAGIC_COOKIE + b"".join(dhcp_options) + b"\xff"
+
+        udp_len = 8 + len(bootp_payload)
+        udp_header = struct.pack("!HHHH", 67, 68, udp_len, 0)
+
+        src_ip = socket.inet_aton(self.server_ip)
+        dst_ip = socket.inet_aton("255.255.255.255")
+        ip_total_len = 20 + udp_len
+        ip_wo_checksum = struct.pack(
+            "!BBHHHBBH4s4s",
+            0x45,
+            0,
+            ip_total_len,
+            0,
+            0,
+            64,
+            17,
+            0,
+            src_ip,
+            dst_ip,
+        )
+        ip_checksum = self._ipv4_checksum(ip_wo_checksum)
+        ip_header = struct.pack(
+            "!BBHHHBBH4s4s",
+            0x45,
+            0,
+            ip_total_len,
+            0,
+            0,
+            64,
+            17,
+            ip_checksum,
+            src_ip,
+            dst_ip,
+        )
+
+        eth_header = b"\xff\xff\xff\xff\xff\xff" + server_mac + struct.pack("!H", ETH_P_IP)
+        return eth_header + ip_header + udp_header + bootp_payload
+
+    def _send_raw_frame(self, egress_ifname: str, raw_frame: bytes, tag: str) -> bool:
         try:
-            raw_frame = bytes(frame)
             with socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ETH_P_ALL)) as tx_sock:
                 tx_sock.sendto(raw_frame, (egress_ifname, 0))
             return True
@@ -391,90 +534,39 @@ class GadgetDhcpServer:
 
     def _send_offer_or_ack(
         self,
-        packet: Any,
+        request: dict[str, Any],
         egress_ifname: str,
         offered_ip: str,
         msg_type: str,
     ) -> bool:
-        bootp = packet[BOOTP]
-
-        options: list[Any] = [("message-type", msg_type)]
+        msg_code = 2 if msg_type == "offer" else 5
+        options = [self._encode_option(53, bytes((msg_code,)))]
         options.extend(self._build_common_options())
-        options.append("end")
-
-        try:
-            server_mac = get_if_hwaddr(egress_ifname)
-            reply = (
-                Ether(src=server_mac, dst="ff:ff:ff:ff:ff:ff")
-                / IP(src=self.server_ip, dst="255.255.255.255")
-                / UDP(sport=67, dport=68)
-                / BOOTP(
-                    op=2,
-                    xid=bootp.xid,
-                    yiaddr=offered_ip,
-                    siaddr=self.server_ip,
-                    chaddr=bootp.chaddr,
-                    flags=bootp.flags,
-                )
-                / DHCP(options=options)
-            )
-            return self._send_raw_frame(egress_ifname, reply, f"msg_type={msg_type}")
-        except OSError as exc:
-            if exc.errno == errno.ENODEV:
-                LOG.warning("Send skipped; interface unavailable iface=%s msg_type=%s", egress_ifname, msg_type)
-                return False
-            raise
-        except ValueError as exc:
-            LOG.warning("Send failed iface=%s msg_type=%s: %s", egress_ifname, msg_type, exc)
+        frame = self._build_reply_frame(request, egress_ifname, offered_ip, options)
+        if frame is None:
             return False
 
-    def _send_nak(self, packet: Any, egress_ifname: str, reason: str) -> bool:
-        bootp = packet[BOOTP]
+        return self._send_raw_frame(egress_ifname, frame, f"msg_type={msg_type}")
 
-        options: list[Any] = [
-            ("message-type", "nak"),
-            ("server_id", self.server_ip),
-            ("message", reason),
-            "end",
+    def _send_nak(self, request: dict[str, Any], egress_ifname: str, reason: str) -> bool:
+        reason_bytes = reason.encode("ascii", errors="ignore")[:255]
+        options = [
+            self._encode_option(53, b"\x06"),
+            self._encode_option(54, socket.inet_aton(self.server_ip)),
+            self._encode_option(56, reason_bytes),
         ]
-
-        try:
-            server_mac = get_if_hwaddr(egress_ifname)
-            reply = (
-                Ether(src=server_mac, dst="ff:ff:ff:ff:ff:ff")
-                / IP(src=self.server_ip, dst="255.255.255.255")
-                / UDP(sport=67, dport=68)
-                / BOOTP(
-                    op=2,
-                    xid=bootp.xid,
-                    yiaddr="0.0.0.0",
-                    siaddr=self.server_ip,
-                    chaddr=bootp.chaddr,
-                    flags=bootp.flags,
-                )
-                / DHCP(options=options)
-            )
-            return self._send_raw_frame(egress_ifname, reply, "msg_type=nak")
-        except OSError as exc:
-            if exc.errno == errno.ENODEV:
-                LOG.warning("NAK send skipped; interface unavailable iface=%s", egress_ifname)
-                return False
-            raise
-        except ValueError as exc:
-            LOG.warning("NAK send failed iface=%s: %s", egress_ifname, exc)
+        frame = self._build_reply_frame(request, egress_ifname, "0.0.0.0", options)
+        if frame is None:
             return False
 
-    def handle_packet(self, packet: Any, ifname : str) -> None:
-        if not self._is_client_dhcp_packet(packet):
-            return
+        return self._send_raw_frame(egress_ifname, frame, "msg_type=nak")
 
-        dhcp_options = packet[DHCP].options
-        msg_raw = self._get_option(dhcp_options, "message-type")
-        msg_type = self._normalize_msg_type(msg_raw)
+    def handle_packet(self, request: dict[str, Any], ifname: str) -> None:
+        msg_type = request["msg_type"]
         if msg_type not in {"discover", "request", "release"}:
             return
 
-        client_mac = self._mac_from_packet(packet)
+        client_mac = request["client_mac"]
 
         if msg_type == "discover":
             self.refresh_interfaces()
@@ -488,9 +580,7 @@ class GadgetDhcpServer:
         if usb_path is None:
             usb_path = self.resolve_usb_device_path(ifname)
 
-        requested_ip = self._get_option(dhcp_options, "requested_addr")
-        if isinstance(requested_ip, bytes):
-            requested_ip = None
+        requested_ip = request.get("requested_ip")
 
         if msg_type == "release":
             self.allocator.release(client_mac)
@@ -508,7 +598,7 @@ class GadgetDhcpServer:
             return
 
         if msg_type == "discover":
-            sent = self._send_offer_or_ack(packet, ifname, allocated_ip, "offer")
+            sent = self._send_offer_or_ack(request, ifname, allocated_ip, "offer")
             if sent:
                 LOG.info(
                     "OFFER ip=%s mac=%s iface=%s usb_path=%s",
@@ -529,7 +619,7 @@ class GadgetDhcpServer:
 
         static_ip = self.static_by_usb_path.get(usb_path, None) if usb_path else None
         if static_ip and requested_ip and requested_ip != static_ip:
-            sent = self._send_nak(packet, ifname, "requested ip does not match static mapping")
+            sent = self._send_nak(request, ifname, "requested ip does not match static mapping")
             if sent:
                 LOG.warning(
                     "NAK mac=%s requested=%s static=%s iface=%s usb_path=%s",
@@ -551,7 +641,7 @@ class GadgetDhcpServer:
             return
 
         self.allocator.renew(client_mac, allocated_ip)
-        sent = self._send_offer_or_ack(packet, ifname, allocated_ip, "ack")
+        sent = self._send_offer_or_ack(request, ifname, allocated_ip, "ack")
         if sent:
             LOG.info(
                 "ACK ip=%s mac=%s iface=%s usb_path=%s",
@@ -569,9 +659,9 @@ class GadgetDhcpServer:
                 usb_path,
             )
 
-    def _safe_process_packet(self, packet: Any, ifname: str) -> None:
+    def _safe_process_packet(self, request: dict[str, Any], ifname: str) -> None:
         try:
-            self.handle_packet(packet, ifname)
+            self.handle_packet(request, ifname)
         except Exception:
             LOG.error("Unhandled exception in packet handler", exc_info=True)
 
@@ -657,15 +747,11 @@ class GadgetDhcpServer:
                 if pkttype == PACKET_OUTGOING:
                     continue
 
-            if not self._is_likely_dhcp_client_frame(frame):
+            request = self._parse_dhcp_request(frame)
+            if request is None:
                 continue
 
-            try:
-                packet = Ether(frame)
-            except Exception:
-                continue
-
-            self._safe_process_packet(packet, ifname)
+            self._safe_process_packet(request, ifname)
 
     def _create_udev_monitor(self) -> Any:
         monitor = pyudev.Monitor.from_netlink(pyudev.Context())
@@ -718,8 +804,6 @@ class GadgetDhcpServer:
             stale.close()
 
     def serve_forever(self) -> None:
-        conf.checkIPaddr = False
-
         receivers: dict[str, socket.socket] = {}
         fd_to_iface: dict[int, str] = {}
         monitor = self._create_udev_monitor()
