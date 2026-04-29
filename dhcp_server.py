@@ -52,7 +52,11 @@ LOG = logging.getLogger("dhcp_gadget")
 USB_IFACE_RE = re.compile(r"^\d+-\d+(?:\.\d+)*:\d+\.\d+$")
 USB_DEVICE_RE = re.compile(r"^\d+-\d+(?:\.\d+)*$")
 ETH_P_ALL = 0x0003
+ETH_P_IP = 0x0800
 SUPPORTED_USB_NET_DRIVERS = {"cdc_ether", "cdc_eem"}
+PACKET_OUTGOING = getattr(socket, "PACKET_OUTGOING", 4)
+SOL_PACKET = getattr(socket, "SOL_PACKET", 263)
+PACKET_IGNORE_OUTGOING_OPT = getattr(socket, "PACKET_IGNORE_OUTGOING", 23)
 
 
 @dataclass
@@ -294,6 +298,66 @@ class GadgetDhcpServer:
 
         return None
 
+    def _is_client_dhcp_packet(self, packet: Any) -> bool:
+        if not (packet.haslayer(DHCP) and packet.haslayer(BOOTP) and packet.haslayer(UDP)):
+            return False
+
+        udp = packet[UDP]
+        if int(udp.sport) != 68 or int(udp.dport) != 67:
+            return False
+
+        bootp = packet[BOOTP]
+        if int(bootp.op) != 1:
+            return False
+
+        return True
+
+    def _is_likely_dhcp_client_frame(self, frame: bytes) -> bool:
+        # Fast path filter to avoid full Scapy decode on unrelated traffic.
+        if len(frame) < 14 + 20 + 8 + 1:
+            return False
+
+        eth_type = (frame[12] << 8) | frame[13]
+        ip_off = 14
+        if eth_type in (0x8100, 0x88A8):
+            if len(frame) < 18 + 20 + 8 + 1:
+                return False
+            eth_type = (frame[16] << 8) | frame[17]
+            ip_off = 18
+
+        if eth_type != ETH_P_IP:
+            return False
+
+        version_ihl = frame[ip_off]
+        if (version_ihl >> 4) != 4:
+            return False
+
+        ip_hlen = (version_ihl & 0x0F) * 4
+        if ip_hlen < 20:
+            return False
+
+        udp_off = ip_off + ip_hlen
+        if len(frame) < udp_off + 8 + 1:
+            return False
+
+        if frame[ip_off + 9] != 17:  # UDP
+            return False
+
+        frag_off = ((frame[ip_off + 6] << 8) | frame[ip_off + 7]) & 0x1FFF
+        if frag_off != 0:
+            return False
+
+        sport = (frame[udp_off] << 8) | frame[udp_off + 1]
+        dport = (frame[udp_off + 2] << 8) | frame[udp_off + 3]
+        if sport != 68 or dport != 67:
+            return False
+
+        bootp_off = udp_off + 8
+        if frame[bootp_off] != 1:
+            return False
+
+        return True
+
     def _mac_from_packet(self, packet: Any) -> str:
         raw = bytes(packet[BOOTP].chaddr[:6])
         return ":".join(f"{b:02x}" for b in raw)
@@ -400,8 +464,8 @@ class GadgetDhcpServer:
             LOG.warning("NAK send failed iface=%s: %s", egress_ifname, exc)
             return False
 
-    def handle_packet(self, packet: Any) -> None:
-        if not (packet.haslayer(DHCP) and packet.haslayer(BOOTP)):
+    def handle_packet(self, packet: Any, ifname : str) -> None:
+        if not self._is_client_dhcp_packet(packet):
             return
 
         dhcp_options = packet[DHCP].options
@@ -415,14 +479,9 @@ class GadgetDhcpServer:
         if msg_type == "discover":
             self.refresh_interfaces()
 
-        ingress_ifname = getattr(packet, "sniffed_on", None)
-        ifname = self.resolve_ingress_interface(ingress_ifname, client_mac)
-        if not ifname:
-            LOG.debug(
-                "Ignore packet; ingress interface unresolved ingress_ifname=%s mac=%s",
-                ingress_ifname,
-                client_mac,
-            )
+        local_mac = self.iface_to_mac.get(ifname)
+        if local_mac and client_mac == local_mac:
+            LOG.debug("Ignore local-originated DHCP frame iface=%s mac=%s", ifname, client_mac)
             return
 
         usb_path = self.iface_to_usb_path.get(ifname)
@@ -510,9 +569,9 @@ class GadgetDhcpServer:
                 usb_path,
             )
 
-    def _safe_process_packet(self, packet: Any) -> None:
+    def _safe_process_packet(self, packet: Any, ifname: str) -> None:
         try:
-            self.handle_packet(packet)
+            self.handle_packet(packet, ifname)
         except Exception:
             LOG.error("Unhandled exception in packet handler", exc_info=True)
 
@@ -524,6 +583,10 @@ class GadgetDhcpServer:
                 socket.htons(ETH_P_ALL),
             )
             recv_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                recv_sock.setsockopt(SOL_PACKET, PACKET_IGNORE_OUTGOING_OPT, 1)
+            except OSError:
+                LOG.debug("PACKET_IGNORE_OUTGOING not available; using userspace outgoing filter")
             recv_sock.bind((ifname, 0))
             recv_sock.setblocking(False)
             return recv_sock
@@ -575,34 +638,91 @@ class GadgetDhcpServer:
     def _handle_receiver_data(self, ifname: str, recv_sock: socket.socket) -> None:
         while True:
             try:
-                frame, _ = recv_sock.recvfrom(65535)
+                frame, addr = recv_sock.recvfrom(65535)
             except BlockingIOError:
                 return
             except OSError as exc:
                 if exc.errno == errno.ENODEV:
                     LOG.info("Receiver read stopped; interface vanished iface=%s", ifname)
-                if exc.errno == errno.ENETDOWN:
+                elif exc.errno == errno.ENETDOWN:
                     LOG.info("Receiver read stopped; interface down iface=%s", ifname)
                 else:
                     LOG.warning("Receiver read failed iface=%s: %s", ifname, exc)
                 raise
+
+            # AF_PACKET recvfrom returns (ifname, proto, pkttype, hatype, addr).
+            # Ignore locally transmitted frames to avoid responding to host DHCP clients.
+            if isinstance(addr, tuple) and len(addr) >= 3:
+                pkttype = addr[2]
+                if pkttype == PACKET_OUTGOING:
+                    continue
+
+            if not self._is_likely_dhcp_client_frame(frame):
+                continue
 
             try:
                 packet = Ether(frame)
             except Exception:
                 continue
 
-            setattr(packet, "sniffed_on", ifname)
-            self._safe_process_packet(packet)
+            self._safe_process_packet(packet, ifname)
+
+    def _create_udev_monitor(self) -> Any:
+        monitor = pyudev.Monitor.from_netlink(pyudev.Context())
+        monitor.filter_by(subsystem="net")
+        monitor.start()
+        return monitor
+
+    def _poll_ready_fds(
+        self,
+        monitor_fd: int,
+        receivers: dict[str, socket.socket],
+        timeout: float = 1.0,
+    ) -> Optional[list[Any]]:
+        try:
+            read_fds: list[Any] = [monitor_fd]
+            read_fds.extend(receivers.values())
+            ready, _, _ = select.select(read_fds, [], [], timeout)
+            return ready
+        except OSError as exc:
+            if exc.errno == errno.EINTR:
+                return None
+            LOG.error("udev monitor select failed: %s", exc)
+            time.sleep(1)
+            return None
+
+    def _drain_udev_events(self, monitor: Any) -> bool:
+        changed = False
+        while True:
+            device = monitor.poll(timeout=0)
+            if device is None:
+                break
+
+            action = device.action or "unknown"
+            ifname = device.get("INTERFACE")
+            LOG.debug("udev event action=%s interface=%s", action, ifname)
+            changed = True
+
+        return changed
+
+    def _drop_receiver(
+        self,
+        ifname: str,
+        receivers: dict[str, socket.socket],
+        fd_to_iface: dict[int, str],
+    ) -> None:
+        stale = receivers.pop(ifname, None)
+        if stale is not None:
+            stale_fd = stale.fileno()
+            fd_to_iface.pop(stale_fd, None)
+            stale.close()
 
     def serve_forever(self) -> None:
         conf.checkIPaddr = False
 
         receivers: dict[str, socket.socket] = {}
         fd_to_iface: dict[int, str] = {}
-        monitor = pyudev.Monitor.from_netlink(pyudev.Context())
-        monitor.filter_by(subsystem="net")
-        monitor.start()
+        monitor = self._create_udev_monitor()
         monitor_fd = monitor.fileno()
         last_resync = time.monotonic()
 
@@ -611,28 +731,14 @@ class GadgetDhcpServer:
             self._sync_receivers(receivers, fd_to_iface)
 
             while self.running:
-                try:
-                    read_fds: list[Any] = [monitor_fd]
-                    read_fds.extend(receivers.values())
-                    ready, _, _ = select.select(read_fds, [], [], 1.0)
-                except OSError as exc:
-                    if exc.errno == errno.EINTR:
-                        continue
-                    LOG.error("udev monitor select failed: %s", exc)
-                    time.sleep(1)
+                ready = self._poll_ready_fds(monitor_fd, receivers, timeout=1.0)
+                if ready is None:
                     continue
 
                 changed = False
                 for fd in ready:
                     if fd == monitor_fd:
-                        while True:
-                            device = monitor.poll(timeout=0)
-                            if device is None:
-                                break
-
-                            action = device.action or "unknown"
-                            ifname = device.get("INTERFACE")
-                            LOG.debug("udev event action=%s interface=%s", action, ifname)
+                        if self._drain_udev_events(monitor):
                             changed = True
                         continue
 
@@ -645,11 +751,7 @@ class GadgetDhcpServer:
                     try:
                         self._handle_receiver_data(ifname, recv_sock)
                     except OSError:
-                        stale = receivers.pop(ifname, None)
-                        if stale is not None:
-                            stale_fd = stale.fileno()
-                            fd_to_iface.pop(stale_fd, None)
-                            stale.close()
+                        self._drop_receiver(ifname, receivers, fd_to_iface)
                         changed = True
 
                 if not ready:
