@@ -3,6 +3,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/filter.h>
 #include <linux/if.h>
 #include <linux/if_ether.h>
 #include <linux/if_packet.h>
@@ -20,6 +21,94 @@
 
 static DgInterfaceEntry g_entries[DG_MAX_INTERFACES];
 static size_t g_entry_count = 0;
+
+/*
+ * Classic socket BPF for AF_PACKET/SOCK_DGRAM sockets:
+ * keep only IPv4 UDP DHCP requests (68 -> 67) with BOOTP request fields
+ * (op=1, htype=1, hlen=6) and the DHCP magic cookie present.
+ */
+static int dg_attach_dhcp_request_filter(int fd) {
+    static const struct sock_filter code[] = {
+        /* Block 1: Require IPv4 packet version (ip[0] high nibble == 4). */
+        BPF_STMT(BPF_LD | BPF_B | BPF_ABS, 0),
+        BPF_STMT(BPF_ALU | BPF_AND | BPF_K, 0xF0),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0x40, 1, 0),
+        BPF_STMT(BPF_RET | BPF_K, 0),
+
+        /* Block 2: Require UDP transport protocol (ip[9] == IPPROTO_UDP). */
+        BPF_STMT(BPF_LD | BPF_B | BPF_ABS, 9),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, IPPROTO_UDP, 1, 0),
+        BPF_STMT(BPF_RET | BPF_K, 0),
+
+        /* Block 3: Drop all fragments; only process whole IPv4 datagrams. */
+        BPF_STMT(BPF_LD | BPF_H | BPF_ABS, 6),
+        BPF_STMT(BPF_ALU | BPF_AND | BPF_K, 0x3FFF),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0, 1, 0),
+        BPF_STMT(BPF_RET | BPF_K, 0),
+
+        /* Block 4: Compute variable IPv4 header length and store as X (IHL * 4). */
+        BPF_STMT(BPF_LDX | BPF_B | BPF_MSH, 0), /* X = IPv4 header length in bytes */
+
+        /* Block 5: Require UDP source port 68 (DHCP client). */
+        BPF_STMT(BPF_LD | BPF_H | BPF_IND, 0),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 68, 1, 0),
+        BPF_STMT(BPF_RET | BPF_K, 0),
+
+        /* Block 6: Require UDP destination port 67 (DHCP server). */
+        BPF_STMT(BPF_LD | BPF_H | BPF_IND, 2),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 67, 1, 0),
+        BPF_STMT(BPF_RET | BPF_K, 0),
+
+        /* Block 7: Require BOOTP op=1 (BOOTREQUEST) at UDP payload offset 8. */
+        BPF_STMT(BPF_LD | BPF_B | BPF_IND, 8),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 1, 1, 0),
+        BPF_STMT(BPF_RET | BPF_K, 0),
+
+        /* Block 8: Require BOOTP htype=1 (Ethernet) at UDP payload offset 9. */
+        BPF_STMT(BPF_LD | BPF_B | BPF_IND, 9),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 1, 1, 0),
+        BPF_STMT(BPF_RET | BPF_K, 0),
+
+        /* Block 9: Require BOOTP hlen=6 (MAC length) at UDP payload offset 10. */
+        BPF_STMT(BPF_LD | BPF_B | BPF_IND, 10),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 6, 1, 0),
+        BPF_STMT(BPF_RET | BPF_K, 0),
+
+        /* Block 10: Verify DHCP magic cookie byte 0 (0x63) at BOOTP+236. */
+        BPF_STMT(BPF_LD | BPF_B | BPF_IND, 244), /* DHCP magic cookie starts at UDP payload + 236 */
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0x63, 1, 0),
+        BPF_STMT(BPF_RET | BPF_K, 0),
+
+        /* Block 11: Verify DHCP magic cookie byte 1 (0x82). */
+        BPF_STMT(BPF_LD | BPF_B | BPF_IND, 245),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0x82, 1, 0),
+        BPF_STMT(BPF_RET | BPF_K, 0),
+
+        /* Block 12: Verify DHCP magic cookie byte 2 (0x53). */
+        BPF_STMT(BPF_LD | BPF_B | BPF_IND, 246),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0x53, 1, 0),
+        BPF_STMT(BPF_RET | BPF_K, 0),
+
+        /* Block 13: Verify DHCP magic cookie byte 3 (0x63). */
+        BPF_STMT(BPF_LD | BPF_B | BPF_IND, 247),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0x63, 1, 0),
+        BPF_STMT(BPF_RET | BPF_K, 0),
+
+        /* Block 14: Accept packet (keep full frame for userspace processing). */
+        BPF_STMT(BPF_RET | BPF_K, 0xFFFFFFFF),
+    };
+    struct sock_fprog prog;
+
+    prog.len = (unsigned short)(sizeof(code) / sizeof(code[0]));
+    prog.filter = (struct sock_filter *)code;
+
+    if (setsockopt(fd, SOL_SOCKET, SO_ATTACH_FILTER, &prog, (socklen_t)sizeof(prog)) != 0) {
+        dg_log(DG_LOG_WARN, "interface bpf attach failed err=%s", strerror(errno));
+        return -1;
+    }
+
+    return 0;
+}
 
 static void dg_close_entry_socket(DgInterfaceEntry *entry) {
     if (entry->sock_fd >= 0) {
@@ -41,6 +130,11 @@ static int dg_open_bound_socket(int ifindex) {
     flags = fcntl(fd, F_GETFL, 0);
     if (flags >= 0) {
         (void)fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    }
+
+    if (dg_attach_dhcp_request_filter(fd) != 0) {
+        close(fd);
+        return -1;
     }
 
 #ifdef PACKET_IGNORE_OUTGOING

@@ -137,8 +137,10 @@ int dg_server_tick(DgServer *server, int timeout_ms) {
                     int error = 0;
                     socklen_t errlen = sizeof(error);
                     (void)getsockopt(pfds[i].fd, SOL_SOCKET, SO_ERROR, (void *)&error, &errlen);
-                    dg_log(DG_LOG_WARN, "interface socket error if=%s idx=%d err=%d", iface->ifname,
-                           iface->ifindex, error);
+                    if (error != ENETDOWN) {
+                        dg_log(DG_LOG_WARN, "interface socket error if=%s idx=%d err=%d", iface->ifname,
+                            iface->ifindex, error);
+                    }
                     continue;
                 }
 

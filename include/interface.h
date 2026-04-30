@@ -1,6 +1,8 @@
 #ifndef DG_INTERFACE_H
 #define DG_INTERFACE_H
 
+#define _GNU_SOURCE 1
+
 #include <net/if.h>
 #include <stddef.h>
 

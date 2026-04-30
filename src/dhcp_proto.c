@@ -154,13 +154,9 @@ static int dg_mac_to_string(const uint8_t *mac, char *out, size_t out_len) {
 
 static int dg_parse_dhcp_request(const uint8_t *frame, size_t frame_len, const struct sockaddr_ll *addr,
                                  DgDhcpRequest *out_req) {
-    uint8_t ver_ihl;
     size_t ip_ihl;
     uint16_t ip_total_len;
-    uint16_t ip_frag_off;
     size_t udp_off;
-    uint16_t src_port;
-    uint16_t dst_port;
     uint16_t udp_len;
     const uint8_t *payload;
     size_t payload_len;
@@ -172,16 +168,9 @@ static int dg_parse_dhcp_request(const uint8_t *frame, size_t frame_len, const s
         return 0;
     }
 
-    ver_ihl = frame[0U];
-    if ((ver_ihl >> 4U) != 4U) {
-        return 0;
-    }
-    ip_ihl = (size_t)(ver_ihl & 0x0FU) * 4U;
+    /* Socket BPF already restricts traffic to DHCPv4 requests; keep length checks here. */
+    ip_ihl = (size_t)(frame[0U] & 0x0FU) * 4U;
     if (ip_ihl < DG_DHCP_IPV4_MIN_HEADER_LEN || frame_len < ip_ihl) {
-        return 0;
-    }
-
-    if (frame[9U] != 17U) {
         return 0;
     }
 
@@ -190,18 +179,7 @@ static int dg_parse_dhcp_request(const uint8_t *frame, size_t frame_len, const s
         return 0;
     }
 
-    ip_frag_off = dg_read_be16(frame + 6U);
-    if ((ip_frag_off & 0x1FFFU) != 0U || (ip_frag_off & 0x2000U) != 0U) {
-        return 0;
-    }
-
     udp_off = ip_ihl;
-    src_port = dg_read_be16(frame + udp_off + 0U);
-    dst_port = dg_read_be16(frame + udp_off + 2U);
-    if (src_port != DG_DHCP_CLIENT_PORT || dst_port != DG_DHCP_SERVER_PORT) {
-        return 0;
-    }
-
     udp_len = dg_read_be16(frame + udp_off + 4U);
     if (udp_len < DG_DHCP_UDP_HEADER_LEN + DG_DHCP_BASE_LEN || (size_t)udp_len > (size_t)ip_total_len - ip_ihl) {
         return 0;
@@ -210,10 +188,7 @@ static int dg_parse_dhcp_request(const uint8_t *frame, size_t frame_len, const s
     payload = frame + udp_off + DG_DHCP_UDP_HEADER_LEN;
     payload_len = (size_t)udp_len - DG_DHCP_UDP_HEADER_LEN;
 
-    if (payload_len < DG_DHCP_BASE_LEN || payload[0] != 1U || payload[1] != 1U || payload[2] != 6U) {
-        return 0;
-    }
-    if (dg_read_be32(payload + DG_DHCP_BOOTP_FIXED_LEN) != DG_DHCP_MAGIC_COOKIE) {
+    if (payload_len < DG_DHCP_BASE_LEN) {
         return 0;
     }
 
