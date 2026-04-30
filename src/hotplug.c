@@ -3,10 +3,10 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/netlink.h>
+#include <limits.h>
 #include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdint.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -19,6 +19,7 @@ typedef struct {
 } DgHotplugState;
 
 static DgHotplugState g_hotplug = {-1, 0};
+static const uint32_t DG_HOTPLUG_UDEV_GROUP = 2U;
 
 static int dg_msg_has_field(const char *buf, ssize_t len, const char *needle) {
     ssize_t i = 0;
@@ -81,7 +82,7 @@ int dg_hotplug_init(void) {
     memset(&addr, 0, sizeof(addr));
     addr.nl_family = AF_NETLINK;
     addr.nl_pid = (uint32_t)getpid();
-    addr.nl_groups = 1U;
+    addr.nl_groups = DG_HOTPLUG_UDEV_GROUP;
 
     if (bind(fd, (const struct sockaddr *)&addr, sizeof(addr)) != 0) {
         close(fd);
@@ -124,6 +125,7 @@ int dg_hotplug_next_event(DgHotplugEvent *out_event) {
         char ifname[16];
         char ifindex_text[32];
         unsigned long ifindex_ul = 0;
+        int have_ifindex = 0;
         char *endptr = NULL;
 
         nread = recv(g_hotplug.fd, buf, sizeof(buf), 0);
@@ -141,22 +143,35 @@ int dg_hotplug_next_event(DgHotplugEvent *out_event) {
             continue;
         }
 
-        if (dg_msg_get_field(buf, nread, "ACTION=", action, sizeof(action)) != 0 ||
-            dg_msg_get_field(buf, nread, "INTERFACE=", ifname, sizeof(ifname)) != 0) {
+        if (dg_msg_get_field(buf, nread, "ACTION=", action, sizeof(action)) != 0) {
             continue;
         }
 
         memset(out_event, 0, sizeof(*out_event));
+        if (dg_msg_get_field(buf, nread, "INTERFACE=", ifname, sizeof(ifname)) != 0) {
+            continue;
+        }
         if (snprintf(out_event->ifname, sizeof(out_event->ifname), "%s", ifname) < 0) {
             continue;
         }
+        if (dg_msg_get_field(buf, nread, "DEVPATH=", out_event->devpath, sizeof(out_event->devpath)) != 0) {
+            continue;
+        }
+        (void)dg_msg_get_field(buf, nread, "ID_NET_DRIVER=", out_event->id_net_driver,
+                               sizeof(out_event->id_net_driver));
 
         if (dg_msg_get_field(buf, nread, "IFINDEX=", ifindex_text, sizeof(ifindex_text)) == 0) {
             errno = 0;
             ifindex_ul = strtoul(ifindex_text, &endptr, 10);
-            if (errno == 0 && endptr != ifindex_text && *endptr == '\0' && ifindex_ul <= (unsigned long)INT32_MAX) {
+            if (errno == 0 && endptr != ifindex_text && *endptr == '\0' && ifindex_ul > 0UL &&
+                ifindex_ul <= (unsigned long)INT_MAX) {
                 out_event->ifindex = (int)ifindex_ul;
+                have_ifindex = 1;
             }
+        }
+
+        if (!have_ifindex) {
+            continue;
         }
 
         if (strcmp(action, "add") == 0) {

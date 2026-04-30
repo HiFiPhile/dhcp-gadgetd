@@ -8,9 +8,7 @@
 #include "interface.h"
 
 int dg_dhcp_proto_init(const DgConfig *cfg, DgAllocator *allocator);
-int dg_dhcp_proto_bind_interface(const DgInterfaceEntry *iface);
-int dg_dhcp_proto_unbind_ifname(const char *ifname);
-int dg_dhcp_proto_poll(int timeout_ms, uint64_t now_ms, int hotplug_fd, int *hotplug_ready);
+int dg_dhcp_proto_drain_socket(const DgInterfaceEntry *entry, uint64_t now_ms);
 void dg_dhcp_proto_shutdown(void);
 
 #endif

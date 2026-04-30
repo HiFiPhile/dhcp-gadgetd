@@ -8,17 +8,14 @@
 #include <linux/if_ether.h>
 #include <linux/if_packet.h>
 #include <net/if.h>
-#include <poll.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
 #include "interface.h"
 #include "log.h"
 
-#define DG_DHCP_ETH_HEADER_LEN 14U
 #define DG_DHCP_IPV4_MIN_HEADER_LEN 20U
 #define DG_DHCP_UDP_HEADER_LEN 8U
 #define DG_DHCP_BOOTP_FIXED_LEN 236U
@@ -47,7 +44,6 @@
 #define DG_DHCP_TYPE_RELEASE 7U
 
 #define DG_DHCP_MAGIC_COOKIE 0x63825363U
-#define DG_DHCP_MAX_RECEIVERS 128
 
 typedef struct {
     uint32_t xid;
@@ -65,17 +61,9 @@ typedef struct {
 } DgDhcpRequest;
 
 typedef struct {
-    int ifindex;
-    int sock_fd;
-    char ifname[IF_NAMESIZE];
-} DgDhcpReceiver;
-
-typedef struct {
     int dry_run;
     DgConfig cfg;
     DgAllocator *allocator;
-    DgDhcpReceiver receivers[DG_DHCP_MAX_RECEIVERS];
-    size_t receiver_count;
 } DgDhcpProtoState;
 
 static DgDhcpProtoState g_state = {0};
@@ -164,222 +152,8 @@ static int dg_mac_to_string(const uint8_t *mac, char *out, size_t out_len) {
     return 0;
 }
 
-static int dg_ifindex_hwaddr(int ifindex, uint8_t out_hwaddr[6]) {
-    char ifname[IF_NAMESIZE];
-    char path[256];
-    FILE *fh;
-    char mac_text[32];
-    unsigned int mac_parts[6];
-    int n;
-
-    if (if_indextoname((unsigned int)ifindex, ifname) == NULL) {
-        return -1;
-    }
-
-    n = snprintf(path, sizeof(path), "/sys/class/net/%s/address", ifname);
-    if (n < 0 || (size_t)n >= sizeof(path)) {
-        return -1;
-    }
-
-    fh = fopen(path, "r");
-    if (fh == NULL) {
-        return -1;
-    }
-
-    if (fgets(mac_text, sizeof(mac_text), fh) == NULL) {
-        fclose(fh);
-        return -1;
-    }
-    fclose(fh);
-
-    if (sscanf(mac_text, "%2x:%2x:%2x:%2x:%2x:%2x", &mac_parts[0], &mac_parts[1], &mac_parts[2], &mac_parts[3],
-               &mac_parts[4], &mac_parts[5]) != 6) {
-        return -1;
-    }
-
-    out_hwaddr[0] = (uint8_t)mac_parts[0];
-    out_hwaddr[1] = (uint8_t)mac_parts[1];
-    out_hwaddr[2] = (uint8_t)mac_parts[2];
-    out_hwaddr[3] = (uint8_t)mac_parts[3];
-    out_hwaddr[4] = (uint8_t)mac_parts[4];
-    out_hwaddr[5] = (uint8_t)mac_parts[5];
-    return 0;
-}
-
-static int dg_find_receiver_index(int ifindex) {
-    size_t i;
-    for (i = 0; i < g_state.receiver_count; i++) {
-        if (g_state.receivers[i].ifindex == ifindex) {
-            return (int)i;
-        }
-    }
-    return -1;
-}
-
-static void dg_remove_receiver_at(size_t idx) {
-    size_t i;
-
-    if (idx >= g_state.receiver_count) {
-        return;
-    }
-
-    if (g_state.receivers[idx].sock_fd >= 0) {
-        close(g_state.receivers[idx].sock_fd);
-    }
-
-    for (i = idx; i + 1U < g_state.receiver_count; i++) {
-        g_state.receivers[i] = g_state.receivers[i + 1U];
-    }
-    if (g_state.receiver_count > 0U) {
-        g_state.receiver_count--;
-    }
-}
-
-static int dg_is_interface_up(const char *ifname) {
-    struct ifreq ifr;
-    int sock;
-
-    if (ifname == NULL || ifname[0] == '\0') {
-        return 0;
-    }
-
-    sock = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sock < 0) {
-        return 0;
-    }
-
-    memset(&ifr, 0, sizeof(ifr));
-    strncpy(ifr.ifr_name, ifname, IFNAMSIZ - 1);
-
-    if (ioctl(sock, SIOCGIFFLAGS, &ifr) < 0) {
-        close(sock);
-        return 0;
-    }
-    close(sock);
-
-    return (ifr.ifr_flags & IFF_UP) ? 1 : 0;
-}
-
-static int dg_open_bound_socket(int ifindex) {
-    int fd;
-    int flags;
-    struct sockaddr_ll bind_addr;
-
-    fd = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
-    if (fd < 0) {
-        return -1;
-    }
-
-    flags = fcntl(fd, F_GETFL, 0);
-    if (flags >= 0) {
-        (void)fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-    }
-
-#ifdef PACKET_IGNORE_OUTGOING
-    {
-        int one = 1;
-        (void)setsockopt(fd, SOL_PACKET, PACKET_IGNORE_OUTGOING, &one, (socklen_t)sizeof(one));
-    }
-#endif
-
-    memset(&bind_addr, 0, sizeof(bind_addr));
-    bind_addr.sll_family = AF_PACKET;
-    bind_addr.sll_protocol = htons(ETH_P_ALL);
-    bind_addr.sll_ifindex = ifindex;
-
-    if (bind(fd, (const struct sockaddr *)&bind_addr, (socklen_t)sizeof(bind_addr)) != 0) {
-        close(fd);
-        return -1;
-    }
-
-    return fd;
-}
-
-static int dg_socket_for_ifindex(int ifindex) {
-    int idx = dg_find_receiver_index(ifindex);
-    if (idx >= 0) {
-        return g_state.receivers[idx].sock_fd;
-    }
-    if (g_state.receiver_count > 0U) {
-        return g_state.receivers[0].sock_fd;
-    }
-    return -1;
-}
-
-static void dg_close_all_receivers(void) {
-    while (g_state.receiver_count > 0U) {
-        dg_remove_receiver_at(g_state.receiver_count - 1U);
-    }
-}
-
-int dg_dhcp_proto_bind_interface(const DgInterfaceEntry *iface) {
-    int idx;
-    int fd;
-
-    if (iface == NULL) {
-        return -1;
-    }
-    if (g_state.dry_run) {
-        return 0;
-    }
-
-    idx = dg_find_receiver_index(iface->ifindex);
-    if (idx >= 0) {
-        if (strcmp(g_state.receivers[(size_t)idx].ifname, iface->ifname) != 0) {
-            dg_log(DG_LOG_INFO, "receiver ifname updated idx=%d old_if=%s new_if=%s", iface->ifindex,
-                   g_state.receivers[(size_t)idx].ifname, iface->ifname);
-            if (snprintf(g_state.receivers[(size_t)idx].ifname, sizeof(g_state.receivers[(size_t)idx].ifname),
-                         "%s", iface->ifname) < 0) {
-                g_state.receivers[(size_t)idx].ifname[0] = '\0';
-            }
-        }
-        return 0;
-    }
-
-    if (g_state.receiver_count >= DG_DHCP_MAX_RECEIVERS) {
-        dg_log(DG_LOG_WARN, "receiver cap reached, skipping if=%s", iface->ifname);
-        return -1;
-    }
-
-    fd = dg_open_bound_socket(iface->ifindex);
-    if (fd < 0) {
-        dg_log(DG_LOG_WARN, "failed to bind receiver for if=%s", iface->ifname);
-        return -1;
-    }
-
-    g_state.receivers[g_state.receiver_count].ifindex = iface->ifindex;
-    g_state.receivers[g_state.receiver_count].sock_fd = fd;
-    if (snprintf(g_state.receivers[g_state.receiver_count].ifname,
-                 sizeof(g_state.receivers[g_state.receiver_count].ifname), "%s", iface->ifname) < 0) {
-        g_state.receivers[g_state.receiver_count].ifname[0] = '\0';
-    }
-    g_state.receiver_count++;
-    dg_log(DG_LOG_INFO, "receiver bound if=%s idx=%d", iface->ifname, iface->ifindex);
-    return 0;
-}
-
-int dg_dhcp_proto_unbind_ifname(const char *ifname) {
-    size_t i;
-
-    if (ifname == NULL || ifname[0] == '\0') {
-        return -1;
-    }
-
-    for (i = 0; i < g_state.receiver_count; i++) {
-        if (strcmp(g_state.receivers[i].ifname, ifname) == 0) {
-            dg_log(DG_LOG_INFO, "receiver unbound if=%s idx=%d", g_state.receivers[i].ifname, g_state.receivers[i].ifindex);
-            dg_remove_receiver_at(i);
-            return 0;
-        }
-    }
-
-    return -1;
-}
-
 static int dg_parse_dhcp_request(const uint8_t *frame, size_t frame_len, const struct sockaddr_ll *addr,
                                  DgDhcpRequest *out_req) {
-    size_t l3_off = DG_DHCP_ETH_HEADER_LEN;
-    uint16_t eth_type;
     uint8_t ver_ihl;
     size_t ip_ihl;
     uint16_t ip_total_len;
@@ -394,50 +168,34 @@ static int dg_parse_dhcp_request(const uint8_t *frame, size_t frame_len, const s
 
     memset(out_req, 0, sizeof(*out_req));
 
-    if (frame_len < DG_DHCP_ETH_HEADER_LEN) {
+    if (frame_len < DG_DHCP_IPV4_MIN_HEADER_LEN) {
         return 0;
     }
 
-    eth_type = dg_read_be16(frame + 12U);
-    if (eth_type == 0x8100U || eth_type == 0x88A8U) {
-        if (frame_len < DG_DHCP_ETH_HEADER_LEN + 4U) {
-            return 0;
-        }
-        eth_type = dg_read_be16(frame + 16U);
-        l3_off += 4U;
-    }
-    if (eth_type != ETH_P_IP) {
-        return 0;
-    }
-
-    if (frame_len < l3_off + DG_DHCP_IPV4_MIN_HEADER_LEN) {
-        return 0;
-    }
-
-    ver_ihl = frame[l3_off + 0U];
+    ver_ihl = frame[0U];
     if ((ver_ihl >> 4U) != 4U) {
         return 0;
     }
     ip_ihl = (size_t)(ver_ihl & 0x0FU) * 4U;
-    if (ip_ihl < DG_DHCP_IPV4_MIN_HEADER_LEN || frame_len < l3_off + ip_ihl) {
+    if (ip_ihl < DG_DHCP_IPV4_MIN_HEADER_LEN || frame_len < ip_ihl) {
         return 0;
     }
 
-    if (frame[l3_off + 9U] != 17U) {
+    if (frame[9U] != 17U) {
         return 0;
     }
 
-    ip_total_len = dg_read_be16(frame + l3_off + 2U);
-    if ((size_t)ip_total_len < ip_ihl + DG_DHCP_UDP_HEADER_LEN || frame_len < l3_off + (size_t)ip_total_len) {
+    ip_total_len = dg_read_be16(frame + 2U);
+    if ((size_t)ip_total_len < ip_ihl + DG_DHCP_UDP_HEADER_LEN || frame_len < (size_t)ip_total_len) {
         return 0;
     }
 
-    ip_frag_off = dg_read_be16(frame + l3_off + 6U);
+    ip_frag_off = dg_read_be16(frame + 6U);
     if ((ip_frag_off & 0x1FFFU) != 0U || (ip_frag_off & 0x2000U) != 0U) {
         return 0;
     }
 
-    udp_off = l3_off + ip_ihl;
+    udp_off = ip_ihl;
     src_port = dg_read_be16(frame + udp_off + 0U);
     dst_port = dg_read_be16(frame + udp_off + 2U);
     if (src_port != DG_DHCP_CLIENT_PORT || dst_port != DG_DHCP_SERVER_PORT) {
@@ -595,9 +353,9 @@ static size_t dg_encode_options(uint8_t *dst, size_t cap, uint8_t msg_type, cons
 
 static int dg_send_reply(const DgDhcpRequest *req, uint8_t reply_type, struct in_addr yiaddr, int include_lease) {
     uint8_t frame[600];
-    uint8_t src_hwaddr[6];
     uint8_t broadcast_hwaddr[6] = {0xFFU, 0xFFU, 0xFFU, 0xFFU, 0xFFU, 0xFFU};
     struct sockaddr_ll out_addr;
+    const DgInterfaceEntry *iface;
     size_t options_len;
     size_t dhcp_len;
     size_t udp_len;
@@ -609,47 +367,38 @@ static int dg_send_reply(const DgDhcpRequest *req, uint8_t reply_type, struct in
     memset(frame, 0, sizeof(frame));
     memset(&out_addr, 0, sizeof(out_addr));
 
-    if (dg_ifindex_hwaddr(req->ifindex, src_hwaddr) != 0) {
-        dg_log(DG_LOG_WARN, "failed to query egress hwaddr for ifindex=%d", req->ifindex);
-        return -1;
-    }
-
-    memcpy(frame + 0U, broadcast_hwaddr, 6U);
-    memcpy(frame + 6U, src_hwaddr, 6U);
-    dg_write_be16(frame + 12U, ETH_P_IP);
-
-    frame[14U] = 0x45U;
-    frame[15U] = 0U;
-    dg_write_be16(frame + 18U, 0U);
-    dg_write_be16(frame + 20U, 0U);
-    frame[22U] = 64U;
-    frame[23U] = 17U;
-    dg_write_be16(frame + 24U, 0U);
-    memcpy(frame + 26U, &g_state.cfg.server_ip.s_addr, 4U);
+    frame[0U] = 0x45U;
+    frame[1U] = 0U;
+    dg_write_be16(frame + 4U, 0U);
+    dg_write_be16(frame + 6U, 0U);
+    frame[8U] = 64U;
+    frame[9U] = 17U;
+    dg_write_be16(frame + 10U, 0U);
+    memcpy(frame + 12U, &g_state.cfg.server_ip.s_addr, 4U);
     dst_ip.s_addr = htonl(0xFFFFFFFFU);
-    memcpy(frame + 30U, &dst_ip.s_addr, 4U);
+    memcpy(frame + 16U, &dst_ip.s_addr, 4U);
 
-    dg_write_be16(frame + 34U, DG_DHCP_SERVER_PORT);
-    dg_write_be16(frame + 36U, DG_DHCP_CLIENT_PORT);
-    dg_write_be16(frame + 38U, 0U);
-    dg_write_be16(frame + 40U, 0U);
+    dg_write_be16(frame + 20U, DG_DHCP_SERVER_PORT);
+    dg_write_be16(frame + 22U, DG_DHCP_CLIENT_PORT);
+    dg_write_be16(frame + 24U, 0U);
+    dg_write_be16(frame + 26U, 0U);
 
-    frame[42U + 0U] = 2U;
-    frame[42U + 1U] = 1U;
-    frame[42U + 2U] = 6U;
-    frame[42U + 3U] = 0U;
-    dg_write_be32(frame + 42U + 4U, req->xid);
-    dg_write_be16(frame + 42U + 8U, 0U);
-    dg_write_be16(frame + 42U + 10U, req->flags);
-    dg_write_be32(frame + 42U + 12U, 0U);
-    memcpy(frame + 42U + 16U, &yiaddr.s_addr, 4U);
-    memcpy(frame + 42U + 20U, &g_state.cfg.server_ip.s_addr, 4U);
-    dg_write_be32(frame + 42U + 24U, 0U);
-    memcpy(frame + 42U + 28U, req->chaddr, 16U);
-    dg_write_be32(frame + 42U + DG_DHCP_BOOTP_FIXED_LEN, DG_DHCP_MAGIC_COOKIE);
+    frame[28U + 0U] = 2U;
+    frame[28U + 1U] = 1U;
+    frame[28U + 2U] = 6U;
+    frame[28U + 3U] = 0U;
+    dg_write_be32(frame + 28U + 4U, req->xid);
+    dg_write_be16(frame + 28U + 8U, 0U);
+    dg_write_be16(frame + 28U + 10U, req->flags);
+    dg_write_be32(frame + 28U + 12U, 0U);
+    memcpy(frame + 28U + 16U, &yiaddr.s_addr, 4U);
+    memcpy(frame + 28U + 20U, &g_state.cfg.server_ip.s_addr, 4U);
+    dg_write_be32(frame + 28U + 24U, 0U);
+    memcpy(frame + 28U + 28U, req->chaddr, 16U);
+    dg_write_be32(frame + 28U + DG_DHCP_BOOTP_FIXED_LEN, DG_DHCP_MAGIC_COOKIE);
 
-    options_len = dg_encode_options(frame + 42U + DG_DHCP_BASE_LEN,
-                                    sizeof(frame) - (42U + DG_DHCP_BASE_LEN), reply_type, &g_state.cfg,
+    options_len = dg_encode_options(frame + 28U + DG_DHCP_BASE_LEN,
+                                    sizeof(frame) - (28U + DG_DHCP_BASE_LEN), reply_type, &g_state.cfg,
                                     include_lease);
     if (options_len == 0U) {
         return -1;
@@ -658,23 +407,25 @@ static int dg_send_reply(const DgDhcpRequest *req, uint8_t reply_type, struct in
     dhcp_len = DG_DHCP_BASE_LEN + options_len;
     udp_len = DG_DHCP_UDP_HEADER_LEN + dhcp_len;
     ip_len = DG_DHCP_IPV4_MIN_HEADER_LEN + udp_len;
-    frame_len = DG_DHCP_ETH_HEADER_LEN + ip_len;
+    frame_len = ip_len;
 
-    dg_write_be16(frame + 16U, (uint16_t)ip_len);
-    dg_write_be16(frame + 38U, (uint16_t)udp_len);
+    dg_write_be16(frame + 2U, (uint16_t)ip_len);
+    dg_write_be16(frame + 24U, (uint16_t)udp_len);
 
-    dg_write_be16(frame + 24U, 0U);
-    dg_write_be16(frame + 24U, dg_checksum(frame + 14U, DG_DHCP_IPV4_MIN_HEADER_LEN));
+    dg_write_be16(frame + 10U, 0U);
+    dg_write_be16(frame + 10U, dg_checksum(frame, DG_DHCP_IPV4_MIN_HEADER_LEN));
 
-    dg_write_be16(frame + 40U, 0U);
-    dg_write_be16(frame + 40U, dg_udp_checksum(g_state.cfg.server_ip, dst_ip, frame + 34U, udp_len));
+    dg_write_be16(frame + 26U, 0U);
+    dg_write_be16(frame + 26U, dg_udp_checksum(g_state.cfg.server_ip, dst_ip, frame + 20U, udp_len));
 
     out_addr.sll_family = AF_PACKET;
+    out_addr.sll_protocol = htons(ETH_P_IP);
     out_addr.sll_ifindex = req->ifindex;
     out_addr.sll_halen = 6U;
     memcpy(out_addr.sll_addr, broadcast_hwaddr, 6U);
 
-    send_fd = dg_socket_for_ifindex(req->ifindex);
+    iface = dg_interface_by_ifindex(req->ifindex);
+    send_fd = (iface != NULL) ? iface->sock_fd : -1;
     if (send_fd < 0) {
         dg_log(DG_LOG_WARN, "no sender socket for ifindex=%d", req->ifindex);
         return -1;
@@ -863,18 +614,12 @@ static int dg_handle_frame(const uint8_t *frame, size_t frame_len, const struct 
 
 int dg_dhcp_proto_init(const DgConfig *cfg, DgAllocator *allocator) {
     int probe_fd;
-    size_t i;
-
-    if (cfg == NULL || allocator == NULL) {
-        return -1;
-    }
 
     memset(&g_state, 0, sizeof(g_state));
     g_state.cfg = *cfg;
     g_state.allocator = allocator;
-    g_state.receiver_count = 0U;
 
-    probe_fd = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
+    probe_fd = socket(AF_PACKET, SOCK_DGRAM, htons(ETH_P_IP));
     if (probe_fd < 0) {
         if (errno == EPERM || errno == EACCES) {
             g_state.dry_run = 1;
@@ -886,180 +631,45 @@ int dg_dhcp_proto_init(const DgConfig *cfg, DgAllocator *allocator) {
     }
     close(probe_fd);
 
-    for (i = 0; i < dg_interface_count(); i++) {
-        const DgInterfaceEntry *iface = dg_interface_get(i);
-        if (iface != NULL) {
-            (void)dg_dhcp_proto_bind_interface(iface);
-        }
-    }
-    dg_log(DG_LOG_INFO, "dhcp protocol module initialized (AF_PACKET per-interface)");
+    dg_log(DG_LOG_INFO, "dhcp protocol module initialized");
     return 0;
 }
 
 void dg_dhcp_proto_shutdown(void) {
-    dg_close_all_receivers();
     g_state.allocator = NULL;
     g_state.dry_run = 0;
     dg_log(DG_LOG_INFO, "dhcp protocol module shutdown");
 }
 
-int dg_dhcp_proto_poll(int timeout_ms, uint64_t now_ms, int hotplug_fd, int *hotplug_ready) {
-    struct pollfd pfds[DG_DHCP_MAX_RECEIVERS + 1U];
-    size_t receiver_map[DG_DHCP_MAX_RECEIVERS];
-    int poll_rc;
-    size_t i;
-    size_t active_receiver_count = 0U;
-    nfds_t nfds;
-    size_t hotplug_idx = 0;
-
-    if (hotplug_ready != NULL) {
-        *hotplug_ready = 0;
-    }
-
-    if (timeout_ms < 0) {
-        timeout_ms = 0;
-    }
+int dg_dhcp_proto_drain_socket(const DgInterfaceEntry *entry, uint64_t now_ms) {
+    int frames = 0;
 
     if (g_state.dry_run) {
-        if (hotplug_fd >= 0) {
-            struct pollfd pfd;
-            memset(&pfd, 0, sizeof(pfd));
-            pfd.fd = hotplug_fd;
-            pfd.events = POLLIN;
-            poll_rc = poll(&pfd, 1, timeout_ms);
-            if (poll_rc < 0) {
-                if (errno == EINTR) {
-                    return 0;
-                }
-                return -1;
-            }
-            if (hotplug_ready != NULL && (pfd.revents & POLLIN) != 0) {
-                *hotplug_ready = 1;
-            }
-            return 0;
-        }
-        (void)poll(NULL, 0, timeout_ms);
         return 0;
     }
 
-    nfds = 0;
-    for (i = 0; i < g_state.receiver_count; i++) {
-        if (!dg_is_interface_up(g_state.receivers[i].ifname)) {
-            continue;
+    while (frames < 16) {
+        uint8_t frame[DG_DHCP_MAX_FRAME_LEN];
+        struct sockaddr_ll addr;
+        socklen_t addr_len = (socklen_t)sizeof(addr);
+        ssize_t nread;
+
+        memset(&addr, 0, sizeof(addr));
+        nread = recvfrom(entry->sock_fd, frame, sizeof(frame), 0, (struct sockaddr *)&addr, &addr_len);
+        if (nread < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+                break;
+            }
+            return -1;
         }
-        receiver_map[active_receiver_count] = i;
-        pfds[nfds].fd = g_state.receivers[i].sock_fd;
-        pfds[nfds].events = POLLIN;
-        pfds[nfds].revents = 0;
-        active_receiver_count++;
-        nfds++;
-    }
 
-    if (hotplug_fd >= 0) {
-        hotplug_idx = (size_t)nfds;
-        pfds[hotplug_idx].fd = hotplug_fd;
-        pfds[hotplug_idx].events = POLLIN;
-        pfds[hotplug_idx].revents = 0;
-        nfds++;
-    }
-
-    if (nfds == 0U) {
-        (void)poll(NULL, 0, timeout_ms);
-        return 0;
-    }
-
-    poll_rc = poll(pfds, nfds, timeout_ms);
-    if (poll_rc < 0) {
-        if (errno == EINTR) {
-            return 0;
-        }
-        return -1;
-    }
-    if (poll_rc == 0) {
-        return 0;
-    }
-
-    i = 0;
-    while (i < active_receiver_count) {
-        size_t receiver_idx = receiver_map[i];
-
-        if (receiver_idx >= g_state.receiver_count) {
-            i++;
+        if (addr.sll_pkttype == PACKET_OUTGOING) {
+            frames++;
             continue;
         }
 
-        if ((pfds[i].revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
-            int error = 0;
-            socklen_t errlen = sizeof(error);
-            getsockopt(pfds[i].fd, SOL_SOCKET, SO_ERROR, (void *)&error, &errlen);
-            if (error == ENETDOWN) {
-                i++;
-                continue;
-            }
-
-            dg_log(DG_LOG_WARN, "receiver error, removing if=%s idx=%d err=%d",
-                   g_state.receivers[receiver_idx].ifname, g_state.receivers[receiver_idx].ifindex, error);
-            dg_remove_receiver_at(receiver_idx);
-            {
-                size_t j;
-                for (j = i + 1U; j < active_receiver_count; j++) {
-                    if (receiver_map[j] > receiver_idx) {
-                        receiver_map[j]--;
-                    }
-                }
-            }
-            i++;
-            continue;
-        }
-
-        if ((pfds[i].revents & POLLIN) != 0) {
-            int frames = 0;
-            int removed = 0;
-            while (frames < 16) {
-                uint8_t frame[DG_DHCP_MAX_FRAME_LEN];
-                struct sockaddr_ll addr;
-                socklen_t addr_len = (socklen_t)sizeof(addr);
-                ssize_t nread;
-
-                memset(&addr, 0, sizeof(addr));
-                nread = recvfrom(pfds[i].fd, frame, sizeof(frame), 0, (struct sockaddr *)&addr, &addr_len);
-                if (nread < 0) {
-                    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
-                        break;
-                    }
-                    if (!dg_is_interface_up(g_state.receivers[receiver_idx].ifname)) {
-                        break;
-                    }
-                    dg_log(DG_LOG_WARN, "receiver recv error, removing if=%s idx=%d",
-                           g_state.receivers[receiver_idx].ifname, g_state.receivers[receiver_idx].ifindex);
-                    dg_remove_receiver_at(receiver_idx);
-                    removed = 1;
-                    break;
-                }
-
-                if (addr.sll_pkttype == PACKET_OUTGOING) {
-                    frames++;
-                    continue;
-                }
-
-                (void)dg_handle_frame(frame, (size_t)nread, &addr, now_ms);
-                frames++;
-            }
-            if (removed) {
-                size_t j;
-                for (j = i + 1U; j < active_receiver_count; j++) {
-                    if (receiver_map[j] > receiver_idx) {
-                        receiver_map[j]--;
-                    }
-                }
-            }
-        }
-
-        i++;
-    }
-
-    if (hotplug_fd >= 0 && hotplug_ready != NULL && (pfds[hotplug_idx].revents & POLLIN) != 0) {
-        *hotplug_ready = 1;
+        (void)dg_handle_frame(frame, (size_t)nread, &addr, now_ms);
+        frames++;
     }
 
     return 0;

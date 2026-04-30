@@ -1,12 +1,17 @@
 #include "server.h"
 
+#include <errno.h>
+#include <poll.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <time.h>
 
 #include "dhcp_proto.h"
 #include "hotplug.h"
 #include "interface.h"
 #include "log.h"
+
+#define DG_SERVER_MAX_POLL_FDS 129U
 
 static const char *dg_hotplug_action_name(DgHotplugAction action) {
     switch (action) {
@@ -39,8 +44,8 @@ int dg_server_init(DgServer *server, const DgConfig *cfg) {
     memset(server, 0, sizeof(*server));
     server->config = *cfg;
 
-    if (dg_interface_refresh() != 0) {
-        dg_log(DG_LOG_WARN, "initial interface refresh returned error");
+    if (dg_interface_init() != 0) {
+        dg_log(DG_LOG_WARN, "initial interface scan returned error");
     }
 
     if (dg_allocator_init(&server->allocator, cfg) != 0) {
@@ -69,8 +74,14 @@ int dg_server_init(DgServer *server, const DgConfig *cfg) {
 }
 
 int dg_server_tick(DgServer *server, int timeout_ms) {
+    struct pollfd pfds[DG_SERVER_MAX_POLL_FDS];
+    size_t iface_map[DG_SERVER_MAX_POLL_FDS];
     int poll_rc;
     int hotplug_ready = 0;
+    nfds_t nfds = 0U;
+    size_t active_iface_count = 0U;
+    size_t hotplug_idx = 0U;
+    size_t i;
 
     if (server == NULL || !server->running) {
         return -1;
@@ -80,10 +91,65 @@ int dg_server_tick(DgServer *server, int timeout_ms) {
         timeout_ms = 0;
     }
 
-    poll_rc = dg_dhcp_proto_poll(timeout_ms, dg_now_monotonic_ms(), dg_hotplug_fd(), &hotplug_ready);
-    if (poll_rc != 0) {
-        dg_log(DG_LOG_ERROR, "poll failed in dhcp protocol tick");
-        return -1;
+    for (i = 0; i < dg_interface_count() && nfds + 1U < DG_SERVER_MAX_POLL_FDS; i++) {
+        const DgInterfaceEntry *iface = dg_interface_get(i);
+        if (iface == NULL || iface->sock_fd < 0 || !dg_interface_is_up(iface)) {
+            continue;
+        }
+
+        iface_map[active_iface_count] = i;
+        pfds[nfds].fd = iface->sock_fd;
+        pfds[nfds].events = POLLIN;
+        pfds[nfds].revents = 0;
+        nfds++;
+        active_iface_count++;
+    }
+
+    if (dg_hotplug_fd() >= 0 && nfds < DG_SERVER_MAX_POLL_FDS) {
+        hotplug_idx = (size_t)nfds;
+        pfds[nfds].fd = dg_hotplug_fd();
+        pfds[nfds].events = POLLIN;
+        pfds[nfds].revents = 0;
+        nfds++;
+    }
+
+    if (nfds == 0U) {
+        (void)poll(NULL, 0, timeout_ms);
+    } else {
+        poll_rc = poll(pfds, nfds, timeout_ms);
+        if (poll_rc < 0) {
+            if (errno != EINTR) {
+                dg_log(DG_LOG_ERROR, "poll failed in server tick");
+                return -1;
+            }
+        } else if (poll_rc > 0) {
+            if (dg_hotplug_fd() >= 0 && (pfds[hotplug_idx].revents & POLLIN) != 0) {
+                hotplug_ready = 1;
+            }
+
+            for (i = 0; i < active_iface_count; i++) {
+                const DgInterfaceEntry *iface = dg_interface_get(iface_map[i]);
+                if (iface == NULL) {
+                    continue;
+                }
+
+                if ((pfds[i].revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
+                    int error = 0;
+                    socklen_t errlen = sizeof(error);
+                    (void)getsockopt(pfds[i].fd, SOL_SOCKET, SO_ERROR, (void *)&error, &errlen);
+                    dg_log(DG_LOG_WARN, "interface socket error if=%s idx=%d err=%d", iface->ifname,
+                           iface->ifindex, error);
+                    continue;
+                }
+
+                if ((pfds[i].revents & POLLIN) != 0) {
+                    if (dg_dhcp_proto_drain_socket(iface, dg_now_monotonic_ms()) != 0) {
+                        dg_log(DG_LOG_WARN, "interface socket recv error if=%s idx=%d", iface->ifname,
+                               iface->ifindex);
+                    }
+                }
+            }
+        }
     }
 
     if (hotplug_ready) {
@@ -98,30 +164,24 @@ int dg_server_tick(DgServer *server, int timeout_ms) {
                 break;
             }
 
-                 dg_log(DG_LOG_DEBUG, "hotplug event: action=%s if=%s idx=%d",
-                     dg_hotplug_action_name(evt.action), evt.ifname, evt.ifindex);
+            dg_log(DG_LOG_DEBUG, "hotplug event: action=%s if=%s idx=%d driver=%s devpath=%s",
+                dg_hotplug_action_name(evt.action), evt.ifname, evt.ifindex, evt.id_net_driver, evt.devpath);
 
             if (evt.action == DG_HOTPLUG_REMOVE) {
-                (void)dg_dhcp_proto_unbind_ifname(evt.ifname);
-                (void)dg_interface_remove(evt.ifindex);
+                (void)dg_interface_remove(&evt);
                 continue;
             }
 
             if (evt.action == DG_HOTPLUG_ADD || evt.action == DG_HOTPLUG_MOVE) {
-                if (dg_interface_upsert_with_ifindex(evt.ifname, evt.ifindex) == 0) {
-                    const DgInterfaceEntry *iface = dg_interface_by_name(evt.ifname);
-                    dg_log(DG_LOG_DEBUG, "hotplug upserted interface: if=%s idx=%d", evt.ifname, iface != NULL ? iface->ifindex : -1);
-                    if (iface != NULL) {
-                        (void)dg_dhcp_proto_bind_interface(iface);
-                    }
+                if (dg_interface_upsert(&evt) == 0) {
+                    dg_log(DG_LOG_DEBUG, "hotplug upserted interface: if=%s idx=%d", evt.ifname, evt.ifindex);
+                } else {
+                    dg_log(DG_LOG_DEBUG,
+                           "skip hotplug add/move: interface upsert rejected if=%s idx=%d driver=%s devpath=%s",
+                           evt.ifname, evt.ifindex, evt.id_net_driver, evt.devpath);
                 }
             }
         }
-    } else if (server->tick_count % 20U == 0U) {
-        // for testing
-        /* if (dg_interface_refresh() != 0) {
-            dg_log(DG_LOG_WARN, "periodic interface refresh returned error");
-        } */
     }
 
     dg_allocator_reap_expired(server->allocator, dg_now_monotonic_ms());
