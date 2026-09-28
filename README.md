@@ -91,11 +91,22 @@ dns=1.1.1.1,8.8.8.8
 # Repeatable key
 static_lease=1-2:1.0=192.168.8.10
 static_lease=1-3:1.0=192.168.8.11
+
+# Repeatable custom DHCP option: decimal code and colon-separated hex bytes
+custom_option=42=c0:a8:08:02
+custom_option=224=01:02:ff
 ```
 
 Use key=value lines, one per setting. Empty lines and lines starting with #, ;, or // are ignored.
 router is optional. If omitted, the DHCP router option is not sent.
 dns is optional. If omitted, the DHCP DNS option is not sent.
+custom_option is optional and repeatable. Its value is a decimal DHCP option code,
+followed by `=`, followed by one or more colon-separated hexadecimal bytes. Custom
+options are included in DHCP OFFER and ACK replies. Codes 0 and 255, codes managed
+by the server (1, 3, 6, 51, 53, and 54), duplicate codes, and payloads larger than
+255 bytes are rejected. At most 32 custom options may be configured, with a combined
+encoded size of 262 bytes; this keeps replies within the DHCP 576-byte minimum packet
+size.
 
 ## Notes
 

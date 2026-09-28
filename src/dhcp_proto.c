@@ -317,6 +317,21 @@ static size_t dg_encode_options(uint8_t *dst, size_t cap, uint8_t msg_type, cons
             memcpy(dst + off, cfg->dns, dns_len);
             off += dns_len;
         }
+
+        {
+            size_t i;
+            for (i = 0; i < cfg->custom_option_count; i++) {
+                const DgCustomOption *option = &cfg->custom_options[i];
+
+                if (off + 2U + option->data_len > cap) {
+                    return 0;
+                }
+                dst[off++] = option->code;
+                dst[off++] = (uint8_t)option->data_len;
+                memcpy(dst + off, option->data, option->data_len);
+                off += option->data_len;
+            }
+        }
     }
 
     if (off + 1U > cap) {

@@ -49,6 +49,19 @@ static int dg_parse_u32_string(const char *text, uint32_t *out_value) {
     return 0;
 }
 
+static int dg_hex_nibble(char ch) {
+    if (ch >= '0' && ch <= '9') {
+        return ch - '0';
+    }
+    if (ch >= 'a' && ch <= 'f') {
+        return ch - 'a' + 10;
+    }
+    if (ch >= 'A' && ch <= 'F') {
+        return ch - 'A' + 10;
+    }
+    return -1;
+}
+
 static int dg_parse_subnet_cidr_string(const char *text, struct in_addr *out_network, struct in_addr *out_mask,
                                        uint8_t *out_prefix) {
     char tmp[48];
@@ -272,6 +285,92 @@ static int dg_parse_static_lease(char *value_text, DgConfig *cfg) {
     return 0;
 }
 
+static int dg_custom_option_code_is_managed(uint32_t code) {
+    return code == 1U || code == 3U || code == 6U || code == 51U || code == 53U || code == 54U;
+}
+
+static int dg_custom_option_code_exists(const DgConfig *cfg, uint8_t code) {
+    size_t i;
+
+    for (i = 0; i < cfg->custom_option_count; i++) {
+        if (cfg->custom_options[i].code == code) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static size_t dg_custom_options_encoded_len(const DgConfig *cfg) {
+    size_t i;
+    size_t total = 0U;
+
+    for (i = 0; i < cfg->custom_option_count; i++) {
+        total += 2U + cfg->custom_options[i].data_len;
+    }
+    return total;
+}
+
+static int dg_parse_custom_option(char *value_text, DgConfig *cfg) {
+    char *sep;
+    char *code_text;
+    char *data_text;
+    const char *cursor;
+    uint32_t code;
+    DgCustomOption option;
+
+    sep = strchr(value_text, '=');
+    if (sep == NULL) {
+        return -1;
+    }
+
+    *sep = '\0';
+    code_text = dg_trim(value_text);
+    data_text = dg_trim(sep + 1);
+    if (*code_text == '\0' || *data_text == '\0') {
+        return -1;
+    }
+
+    if (dg_parse_u32_string(code_text, &code) != 0 || code == 0U || code >= 255U ||
+        dg_custom_option_code_is_managed(code) || dg_custom_option_code_exists(cfg, (uint8_t)code) ||
+        cfg->custom_option_count >= DG_MAX_CUSTOM_OPTIONS) {
+        return -1;
+    }
+
+    memset(&option, 0, sizeof(option));
+    option.code = (uint8_t)code;
+    cursor = data_text;
+    while (*cursor != '\0') {
+        int high;
+        int low;
+
+        if (option.data_len >= DG_MAX_DHCP_OPTION_DATA_LEN || cursor[1] == '\0') {
+            return -1;
+        }
+        high = dg_hex_nibble(cursor[0]);
+        low = dg_hex_nibble(cursor[1]);
+        if (high < 0 || low < 0) {
+            return -1;
+        }
+        option.data[option.data_len++] = (uint8_t)((high << 4) | low);
+        cursor += 2;
+
+        if (*cursor == '\0') {
+            break;
+        }
+        if (*cursor != ':' || cursor[1] == '\0') {
+            return -1;
+        }
+        cursor++;
+    }
+
+    cfg->custom_options[cfg->custom_option_count++] = option;
+    if (dg_custom_options_encoded_len(cfg) > DG_MAX_CUSTOM_OPTIONS_ENCODED_LEN) {
+        cfg->custom_option_count--;
+        return -1;
+    }
+    return 0;
+}
+
 static int dg_validate_collisions(const DgConfig *cfg) {
     size_t i;
     uint32_t pool_start = dg_ipv4_to_u32(cfg->pool.start);
@@ -343,6 +442,7 @@ static int dg_parse_config_text(char *text, DgConfig *cfg) {
 
     cfg->has_router = 0;
     cfg->dns_count = 0;
+    cfg->custom_option_count = 0;
     cfg->static_lease_count = 0;
 
     line = strtok_r(text, "\n", &saveptr);
@@ -425,6 +525,11 @@ static int dg_parse_config_text(char *text, DgConfig *cfg) {
                 dg_log(DG_LOG_ERROR, "config parse error at line %zu: invalid static_lease entry", line_no);
                 return -1;
             }
+        } else if (strcmp(key, "custom_option") == 0) {
+            if (dg_parse_custom_option(value, cfg) != 0) {
+                dg_log(DG_LOG_ERROR, "config parse error at line %zu: invalid custom_option entry", line_no);
+                return -1;
+            }
         } else {
             dg_log(DG_LOG_ERROR, "config parse error at line %zu: unknown key '%s'", line_no, key);
             return -1;
@@ -471,6 +576,7 @@ void dg_config_set_defaults(DgConfig *out_cfg) {
     dg_parse_ipv4_string("192.168.8.200", &out_cfg->pool.end);
     out_cfg->pool.lease_seconds = 86400;
     out_cfg->dns_count = 0;
+    out_cfg->custom_option_count = 0;
     out_cfg->static_lease_count = 0;
 }
 
@@ -506,8 +612,9 @@ int dg_config_load(const char *path, DgConfig *out_cfg) {
     }
 
     free(text);
-    dg_log(DG_LOG_INFO, "config loaded: lease_time=%u static_leases=%zu dns=%zu", out_cfg->pool.lease_seconds,
-           out_cfg->static_lease_count, out_cfg->dns_count);
+    dg_log(DG_LOG_INFO, "config loaded: lease_time=%u static_leases=%zu dns=%zu custom_options=%zu",
+           out_cfg->pool.lease_seconds, out_cfg->static_lease_count, out_cfg->dns_count,
+           out_cfg->custom_option_count);
 
     for (i = 0; i < out_cfg->static_lease_count; i++) {
         char ip_text[INET_ADDRSTRLEN];
