@@ -19,6 +19,8 @@ if systemctl list-unit-files | grep -q "^${SERVICE_NAME}"; then
   systemctl disable --now "${SERVICE_NAME}" || true
 fi
 
+rm -f /etc/dbus-1/system.d/org.dhcp_gadget1.conf
+busctl call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus ReloadConfig
 rm -f "${SYSTEMD_UNIT}"
 systemctl daemon-reload
 systemctl reset-failed || true

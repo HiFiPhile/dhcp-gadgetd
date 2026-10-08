@@ -11,7 +11,7 @@
 #include "interface.h"
 #include "log.h"
 
-#define DG_SERVER_MAX_POLL_FDS 129U
+#define DG_SERVER_MAX_POLL_FDS 130U
 
 static const char *dg_hotplug_action_name(DgHotplugAction action) {
     switch (action) {
@@ -68,6 +68,11 @@ int dg_server_init(DgServer *server, const DgConfig *cfg) {
         return -1;
     }
 
+    if (dg_bus_init(&server->bus, &server->config, server->allocator, NULL) < 0) {
+        dg_server_shutdown(server);
+        return -1;
+    }
+
     server->running = 1;
     dg_log(DG_LOG_INFO, "server initialized");
     return 0;
@@ -91,7 +96,7 @@ int dg_server_tick(DgServer *server, int timeout_ms) {
         timeout_ms = 0;
     }
 
-    for (i = 0; i < dg_interface_count() && nfds + 1U < DG_SERVER_MAX_POLL_FDS; i++) {
+    for (i = 0; i < dg_interface_count() && nfds + 2U < DG_SERVER_MAX_POLL_FDS; i++) {
         const DgInterfaceEntry *iface = dg_interface_get(i);
         if (iface == NULL || iface->sock_fd < 0 || !dg_interface_is_up(iface)) {
             continue;
@@ -113,42 +118,45 @@ int dg_server_tick(DgServer *server, int timeout_ms) {
         nfds++;
     }
 
-    if (nfds == 0U) {
-        (void)poll(NULL, 0, timeout_ms);
-    } else {
-        poll_rc = poll(pfds, nfds, timeout_ms);
-        if (poll_rc < 0) {
-            if (errno != EINTR) {
-                dg_log(DG_LOG_ERROR, "poll failed in server tick");
-                return -1;
+    if (dg_bus_process(server->bus) < 0 ||
+        dg_bus_prepare_poll(server->bus, &pfds[nfds], &timeout_ms) < 0) {
+        dg_log(DG_LOG_ERROR, "D-Bus dispatch failed");
+        return -1;
+    }
+    nfds++;
+
+    poll_rc = poll(pfds, nfds, timeout_ms);
+    if (poll_rc < 0) {
+        if (errno != EINTR) {
+            dg_log(DG_LOG_ERROR, "poll failed in server tick");
+            return -1;
+        }
+    } else if (poll_rc > 0) {
+        if (dg_hotplug_fd() >= 0 && (pfds[hotplug_idx].revents & POLLIN) != 0) {
+            hotplug_ready = 1;
+        }
+
+        for (i = 0; i < active_iface_count; i++) {
+            const DgInterfaceEntry *iface = dg_interface_get(iface_map[i]);
+            if (iface == NULL) {
+                continue;
             }
-        } else if (poll_rc > 0) {
-            if (dg_hotplug_fd() >= 0 && (pfds[hotplug_idx].revents & POLLIN) != 0) {
-                hotplug_ready = 1;
+
+            if ((pfds[i].revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
+                int error = 0;
+                socklen_t errlen = sizeof(error);
+                (void)getsockopt(pfds[i].fd, SOL_SOCKET, SO_ERROR, (void *)&error, &errlen);
+                if (error != ENETDOWN) {
+                    dg_log(DG_LOG_WARN, "interface socket error if=%s idx=%d err=%d", iface->ifname,
+                        iface->ifindex, error);
+                }
+                continue;
             }
 
-            for (i = 0; i < active_iface_count; i++) {
-                const DgInterfaceEntry *iface = dg_interface_get(iface_map[i]);
-                if (iface == NULL) {
-                    continue;
-                }
-
-                if ((pfds[i].revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
-                    int error = 0;
-                    socklen_t errlen = sizeof(error);
-                    (void)getsockopt(pfds[i].fd, SOL_SOCKET, SO_ERROR, (void *)&error, &errlen);
-                    if (error != ENETDOWN) {
-                        dg_log(DG_LOG_WARN, "interface socket error if=%s idx=%d err=%d", iface->ifname,
-                            iface->ifindex, error);
-                    }
-                    continue;
-                }
-
-                if ((pfds[i].revents & POLLIN) != 0) {
-                    if (dg_dhcp_proto_drain_socket(iface, dg_now_monotonic_ms()) != 0) {
-                        dg_log(DG_LOG_WARN, "interface socket recv error if=%s idx=%d", iface->ifname,
-                               iface->ifindex);
-                    }
+            if ((pfds[i].revents & POLLIN) != 0) {
+                if (dg_dhcp_proto_drain_socket(iface, dg_now_monotonic_ms()) != 0) {
+                    dg_log(DG_LOG_WARN, "interface socket recv error if=%s idx=%d", iface->ifname,
+                           iface->ifindex);
                 }
             }
         }
@@ -188,6 +196,10 @@ int dg_server_tick(DgServer *server, int timeout_ms) {
 
     dg_allocator_reap_expired(server->allocator, dg_now_monotonic_ms());
 
+    if (dg_bus_process(server->bus) < 0) {
+        dg_log(DG_LOG_ERROR, "D-Bus dispatch failed");
+        return -1;
+    }
     server->tick_count++;
 
     return 0;
@@ -213,6 +225,8 @@ void dg_server_shutdown(DgServer *server) {
     }
 
     server->running = 0;
+    dg_bus_cleanup(server->bus);
+    server->bus = NULL;
     dg_allocator_cleanup(server->allocator);
     server->allocator = NULL;
     dg_hotplug_shutdown();

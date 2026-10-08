@@ -1,10 +1,12 @@
 [Unit]
 Description=DHCP Gadget Daemon
-After=network-online.target
+After=network-online.target dbus.service
+Requires=dbus.service
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=dbus
+BusName=org.dhcp_gadget1
 EnvironmentFile=-/etc/default/dhcp-gadget
 
 Environment=CONFIG=/etc/dhcp-gadget/config.conf
@@ -17,7 +19,8 @@ AmbientCapabilities=CAP_NET_RAW CAP_NET_BIND_SERVICE
 
 # Basic service sandboxing.
 NoNewPrivileges=true
-DynamicUser=true
+User=dhcp-gadget
+Group=dhcp-gadget
 PrivateDevices=true
 ProtectHome=true
 ProtectControlGroups=true

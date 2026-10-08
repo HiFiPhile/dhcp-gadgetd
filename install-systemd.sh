@@ -34,6 +34,30 @@ if [[ ! -f "${SCRIPT_DIR}/config.example.conf" ]]; then
   exit 1
 fi
 
+for file in dhcp-gadget.sysusers org.dhcp_gadget1.conf; do
+  if [[ ! -f "${SCRIPT_DIR}/${file}" ]]; then
+    echo "${file} not found next to installer script." >&2
+    exit 1
+  fi
+done
+
+# Stop before creating the permanent account: the old DynamicUser account is
+# visible through NSS while running, causing sysusers to skip account creation.
+unit_load_state="$(systemctl show --property=LoadState --value "${SERVICE_NAME}")"
+if [[ "${unit_load_state}" != "not-found" ]]; then
+  systemctl stop "${SERVICE_NAME}"
+fi
+
+systemd-sysusers "${SCRIPT_DIR}/dhcp-gadget.sysusers"
+if ! getent -s files passwd dhcp-gadget >/dev/null ||
+   ! getent -s files group dhcp-gadget >/dev/null; then
+  echo "Permanent dhcp-gadget user/group was not created; installation stopped." >&2
+  exit 1
+fi
+install -d -m 0755 /etc/dbus-1/system.d
+install -m 0644 "${SCRIPT_DIR}/org.dhcp_gadget1.conf" /etc/dbus-1/system.d/org.dhcp_gadget1.conf
+busctl call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus ReloadConfig
+
 install -d -m 0755 "${APP_DIR}"
 install -d -m 0755 "${CONFIG_DIR}"
 
@@ -56,7 +80,9 @@ fi
 install -m 0644 "${SCRIPT_DIR}/dhcp-gadget.service" "${SYSTEMD_UNIT}"
 
 systemctl daemon-reload
-systemctl enable --now "${SERVICE_NAME}"
+systemctl enable "${SERVICE_NAME}"
+systemctl reset-failed "${SERVICE_NAME}"
+systemctl restart "${SERVICE_NAME}"
 
 echo "Installed and started ${SERVICE_NAME}"
 echo "Edit config: ${CONFIG_DIR}/config.conf"

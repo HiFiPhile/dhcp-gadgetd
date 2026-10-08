@@ -2,6 +2,7 @@
 
 #include <arpa/inet.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "log.h"
@@ -25,6 +26,8 @@ struct DgAllocator {
     size_t static_lease_count;
     DgDynamicLease dynamic_leases[DG_MAX_DYNAMIC_LEASES];
     size_t dynamic_count;
+    DgActiveLease active_leases[DG_MAX_ACTIVE_LEASES];
+    uint64_t lease_revision;
 };
 
 static uint32_t dg_ipv4_to_u32(struct in_addr addr) {
@@ -197,14 +200,29 @@ int dg_allocator_assign_dynamic(DgAllocator *allocator, const char *mac, uint64_
 
 int dg_allocator_release_mac(DgAllocator *allocator, const char *mac) {
     int idx;
+    int released = 0;
+    size_t i;
 
     if (allocator == NULL || mac == NULL) {
         return -1;
     }
 
+    for (i = 0; i < DG_MAX_ACTIVE_LEASES; i++) {
+        DgActiveLease *lease = &allocator->active_leases[i];
+        char text[18];
+        if (!lease->expires_at_ms) continue;
+        (void)snprintf(text, sizeof(text), "%02x:%02x:%02x:%02x:%02x:%02x",
+                       lease->mac[0], lease->mac[1], lease->mac[2],
+                       lease->mac[3], lease->mac[4], lease->mac[5]);
+        if (lease->expires_at_ms != 0 && strcmp(text, mac) == 0) {
+            lease->expires_at_ms = 0;
+            allocator->lease_revision++;
+            released = 1;
+        }
+    }
     idx = dg_find_dynamic_by_mac(allocator, mac);
     if (idx < 0) {
-        return -1;
+        return released ? 0 : -1;
     }
 
     allocator->dynamic_leases[idx].in_use = 0;
@@ -231,6 +249,14 @@ void dg_allocator_reap_expired(DgAllocator *allocator, uint64_t now_ms) {
         return;
     }
 
+    for (i = 0; i < DG_MAX_ACTIVE_LEASES; i++) {
+        DgActiveLease *lease = &allocator->active_leases[i];
+        if (lease->expires_at_ms != 0 && lease->expires_at_ms <= now_ms) {
+            lease->expires_at_ms = 0;
+            allocator->lease_revision++;
+        }
+    }
+
     if (allocator->last_reap_ms == 0 || now_ms - allocator->last_reap_ms >= 5000U) {
         allocator->last_reap_ms = now_ms;
 
@@ -252,4 +278,60 @@ void dg_allocator_reap_expired(DgAllocator *allocator, uint64_t now_ms) {
 
 void dg_allocator_cleanup(DgAllocator *allocator) {
     free(allocator);
+}
+
+int dg_allocator_ack(DgAllocator *allocator, const uint8_t mac[6],
+                     const uint8_t *client_id, size_t client_id_len,
+                     struct in_addr ip, uint64_t now_ms) {
+    DgActiveLease *slot = NULL;
+    size_t i;
+
+    if (!allocator || !mac || client_id_len > 255 || (client_id_len && !client_id)) {
+        return -1;
+    }
+    dg_allocator_reap_expired(allocator, now_ms);
+    for (i = 0; i < DG_MAX_ACTIVE_LEASES; i++) {
+        DgActiveLease *lease = &allocator->active_leases[i];
+        if (lease->expires_at_ms &&
+            (memcmp(lease->mac, mac, 6) == 0 || lease->ip.s_addr == ip.s_addr)) {
+            lease->expires_at_ms = 0;
+            slot = lease;
+        }
+    }
+    if (!slot) {
+        for (i = 0; i < DG_MAX_ACTIVE_LEASES; i++) {
+            if (!allocator->active_leases[i].expires_at_ms) {
+                slot = &allocator->active_leases[i];
+                break;
+            }
+        }
+    }
+    if (!slot) {
+        return -1;
+    }
+    memset(slot, 0, sizeof(*slot));
+    memcpy(slot->mac, mac, 6);
+    if (client_id_len) {
+        memcpy(slot->client_id, client_id, client_id_len);
+        slot->client_id_len = client_id_len;
+    } else {
+        slot->client_id[0] = 1; /* Ethernet hardware type followed by MAC. */
+        memcpy(slot->client_id + 1, mac, 6);
+        slot->client_id_len = 7;
+    }
+    slot->ip = ip;
+    slot->expires_at_ms = dg_compute_expiry(now_ms, allocator->lease_seconds);
+    allocator->lease_revision++;
+    return 0;
+}
+
+const DgActiveLease *dg_allocator_active_lease(const DgAllocator *allocator, size_t index) {
+    if (!allocator || index >= DG_MAX_ACTIVE_LEASES || !allocator->active_leases[index].expires_at_ms) {
+        return NULL;
+    }
+    return &allocator->active_leases[index];
+}
+
+uint64_t dg_allocator_lease_revision(const DgAllocator *allocator) {
+    return allocator->lease_revision;
 }

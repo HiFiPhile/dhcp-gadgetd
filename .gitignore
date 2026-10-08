@@ -2,3 +2,7 @@ __pycache__/
 *.pyc
 .venv/
 *.o
+*.d
+tests/config_test
+tests/bus_test
+tests/proto_test
