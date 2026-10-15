@@ -266,6 +266,44 @@ static int dg_parse_dns_list(char *value_text, DgConfig *cfg) {
     return 0;
 }
 
+/*
+ * Driver names are limited to letters, digits, '_' and '-', which covers kernel
+ * driver names and keeps them safe inside the generated udev rule.
+ */
+static int dg_parse_driver_list(char *value_text, DgConfig *cfg) {
+    char *saveptr = NULL;
+    char *item;
+
+    cfg->driver_count = 0;
+    item = strtok_r(value_text, ",", &saveptr);
+    while (item != NULL) {
+        char *name = dg_trim(item);
+        size_t len = strlen(name);
+        size_t i;
+
+        if (len > 0U) {
+            if (len >= DG_MAX_DRIVER_NAME_LEN || cfg->driver_count >= DG_MAX_DRIVERS) {
+                return -1;
+            }
+            for (i = 0; i < len; i++) {
+                if (!isalnum((unsigned char)name[i]) && name[i] != '_' && name[i] != '-') {
+                    return -1;
+                }
+            }
+            for (i = 0; i < cfg->driver_count; i++) {
+                if (strcmp(cfg->drivers[i], name) == 0) {
+                    return -1;
+                }
+            }
+            memcpy(cfg->drivers[cfg->driver_count++], name, len + 1U);
+        }
+
+        item = strtok_r(NULL, ",", &saveptr);
+    }
+
+    return cfg->driver_count > 0U ? 0 : -1;
+}
+
 static int dg_parse_static_lease(char *value_text, DgConfig *cfg) {
     char *sep;
     char *usb_path;
@@ -553,6 +591,11 @@ static int dg_parse_config_text(char *text, DgConfig *cfg) {
                 dg_log(DG_LOG_ERROR, "config parse error at line %zu: invalid bridge interface name", line_no);
                 return -1;
             }
+        } else if (strcmp(key, "drivers") == 0) {
+            if (dg_parse_driver_list(value, cfg) != 0) {
+                dg_log(DG_LOG_ERROR, "config parse error at line %zu: invalid drivers list", line_no);
+                return -1;
+            }
         } else {
             dg_log(DG_LOG_ERROR, "config parse error at line %zu: unknown key '%s'", line_no, key);
             return -1;
@@ -602,6 +645,9 @@ void dg_config_set_defaults(DgConfig *out_cfg) {
     out_cfg->custom_option_count = 0;
     out_cfg->static_lease_count = 0;
     strcpy(out_cfg->bridge_name, "gadget0");
+    strcpy(out_cfg->drivers[0], "cdc_ether");
+    strcpy(out_cfg->drivers[1], "cdc_eem");
+    out_cfg->driver_count = 2;
 }
 
 int dg_config_load(const char *path, DgConfig *out_cfg) {
@@ -636,9 +682,12 @@ int dg_config_load(const char *path, DgConfig *out_cfg) {
     }
 
     free(text);
-    dg_log(DG_LOG_INFO, "config loaded: bridge=%s lease_time=%u static_leases=%zu dns=%zu custom_options=%zu",
-           out_cfg->bridge_name, out_cfg->pool.lease_seconds, out_cfg->static_lease_count, out_cfg->dns_count,
-           out_cfg->custom_option_count);
+    dg_log(DG_LOG_INFO, "config loaded: bridge=%s drivers=%zu lease_time=%u static_leases=%zu dns=%zu custom_options=%zu",
+           out_cfg->bridge_name, out_cfg->driver_count, out_cfg->pool.lease_seconds, out_cfg->static_lease_count,
+           out_cfg->dns_count, out_cfg->custom_option_count);
+    for (i = 0; i < out_cfg->driver_count; i++) {
+        dg_log(DG_LOG_DEBUG, "gadget driver configured name=%s", out_cfg->drivers[i]);
+    }
 
     for (i = 0; i < out_cfg->static_lease_count; i++) {
         char ip_text[INET_ADDRSTRLEN];

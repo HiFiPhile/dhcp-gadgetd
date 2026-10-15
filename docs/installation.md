@@ -29,11 +29,11 @@ restarts the service.
 | `dhcp-gadget.env` | `/etc/default/dhcp-gadget` | [Service environment](#service-settings); only if missing |
 | `dhcp-gadget.service` | `/etc/systemd/system/dhcp-gadget.service` | systemd unit |
 | `org.dhcp_gadget1.conf` | `/etc/dbus-1/system.d/org.dhcp_gadget1.conf` | D-Bus policy: only root and `dhcp-gadget` may own the bus name; anyone may read it |
-| `90-dhcp-gadget.rules` | `/etc/udev/rules.d/90-dhcp-gadget.rules` | Keeps NetworkManager and systemd-networkd off gadget ports; see [Other network managers](host-bridge.md#other-network-managers) |
+| `90-dhcp-gadget.rules.in` | `/etc/udev/rules.d/90-dhcp-gadget.rules` | Generated with the configured [`drivers`](configuration.md#gadget-drivers); keeps NetworkManager and systemd-networkd off gadget ports, see [Other network managers](host-bridge.md#other-network-managers) |
 | `dhcp-gadget.sysusers` | not copied; applied once | Creates the system user and group `dhcp-gadget` |
 
-Re-running the script upgrades the binary, unit, D-Bus policy, and udev rule, and
-keeps your config and environment file. It also handles upgrading from an older
+Re-running the script upgrades the binary, unit, and D-Bus policy, regenerates the
+udev rule from the current `drivers`, and keeps your config and environment file. It also handles upgrading from an older
 install that used `DynamicUser`.
 
 ## Manual installation
@@ -64,16 +64,7 @@ These steps do what the script does. Run them from the repository root after `ma
    sudo busctl call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus ReloadConfig
    ```
 
-4. Install the udev rule and apply it to gadgets that are already plugged in:
-
-   ```bash
-   sudo install -Dm644 90-dhcp-gadget.rules /etc/udev/rules.d/90-dhcp-gadget.rules
-   sudo udevadm control --reload
-   sudo udevadm trigger --action=change --subsystem-match=net \
-     --property-match=ID_NET_DRIVER=cdc_ether --property-match=ID_NET_DRIVER=cdc_eem
-   ```
-
-5. Install the daemon, the configuration, and the service environment file. When
+4. Install the daemon, the configuration, and the service environment file. When
    upgrading, skip the last two lines; `install` overwrites existing files.
 
    ```bash
@@ -83,6 +74,22 @@ These steps do what the script does. Run them from the repository root after `ma
    ```
 
    Edit `/etc/dhcp-gadget/config.conf` now or later; see [Configuration](configuration.md).
+   Set [`drivers`](configuration.md#gadget-drivers) before the next step, which reads it.
+
+5. Generate the udev rule from the configured drivers, then apply it to ports that
+   are already plugged in. `--print-drivers` validates the config and prints one
+   driver per line. The trigger also covers ports that an earlier rule marked, so a
+   removed driver is released.
+
+   ```bash
+   drivers=$(/opt/dhcp-gadget/dhcp-gadgetd --config /etc/dhcp-gadget/config.conf --print-drivers)
+   sed "s/@DRIVERS@/$(paste -sd'|' <<< "$drivers")/" 90-dhcp-gadget.rules.in |
+     sudo tee /etc/udev/rules.d/90-dhcp-gadget.rules > /dev/null
+   sudo udevadm control --reload
+   sudo udevadm trigger --action=change --subsystem-match=net \
+     --property-match=ID_NET_MANAGED_BY=org.dhcp_gadget1 \
+     $(sed 's/^/--property-match=ID_NET_DRIVER=/' <<< "$drivers")
+   ```
 
 6. Install the unit, then enable and start the service. `reset-failed` clears an
    earlier start-limit failure, which would otherwise block the restart.
@@ -160,8 +167,7 @@ sudo systemctl disable --now dhcp-gadget.service
 sudo ip link delete dev gadget0        # or the bridge name set in the config
 sudo rm /etc/udev/rules.d/90-dhcp-gadget.rules
 sudo udevadm control --reload
-sudo udevadm trigger --action=change --subsystem-match=net \
-  --property-match=ID_NET_DRIVER=cdc_ether --property-match=ID_NET_DRIVER=cdc_eem
+sudo udevadm trigger --action=change --subsystem-match=net --property-match=ID_NET_MANAGED_BY=org.dhcp_gadget1
 sudo rm /etc/dbus-1/system.d/org.dhcp_gadget1.conf
 sudo busctl call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus ReloadConfig
 sudo rm /etc/systemd/system/dhcp-gadget.service

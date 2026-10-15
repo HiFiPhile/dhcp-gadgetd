@@ -35,9 +35,8 @@ fi
 
 rm -f /etc/udev/rules.d/90-dhcp-gadget.rules
 udevadm control --reload
-# Hand already plugged-in gadget ports back to the host network managers.
-udevadm trigger --action=change --subsystem-match=net \
-  --property-match=ID_NET_DRIVER=cdc_ether --property-match=ID_NET_DRIVER=cdc_eem
+# Hand the ports the rule marked back to the host network managers.
+udevadm trigger --action=change --subsystem-match=net --property-match=ID_NET_MANAGED_BY=org.dhcp_gadget1
 
 rm -f /etc/dbus-1/system.d/org.dhcp_gadget1.conf
 busctl call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus ReloadConfig

@@ -1,0 +1,4 @@
+# dhcp-gadgetd adds every interface using a configured gadget driver to its bridge.
+# Keep NetworkManager and systemd-networkd from configuring those ports.
+# install-systemd.sh fills in the driver list from the drivers key of config.conf.
+ACTION!="remove", SUBSYSTEM=="net", ENV{ID_NET_DRIVER}=="@DRIVERS@", ENV{NM_UNMANAGED}="1", ENV{ID_NET_MANAGED_BY}="org.dhcp_gadget1"

@@ -53,7 +53,7 @@ def decode(name, value):
             }
             for family, client_id, ip, gateway, mac, expiration in value
         ]
-    return value  # Remaining properties are JSON-compatible strings or integers.
+    return value  # Remaining properties are JSON-compatible strings, integers, or string arrays.
 
 
 def emit(event, properties):

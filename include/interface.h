@@ -16,7 +16,8 @@ typedef struct {
 	int sock_fd;
 } DgInterfaceEntry;
 
-int dg_interface_init(void);
+/* Only interfaces whose driver is listed in cfg->drivers are tracked. */
+int dg_interface_init(const DgConfig *cfg);
 int dg_interface_upsert(const DgHotplugEvent *evt);
 int dg_interface_remove(const DgHotplugEvent *evt);
 int dg_interface_is_up(const DgInterfaceEntry *entry);

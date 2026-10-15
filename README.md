@@ -14,8 +14,9 @@ static_lease=1-3.3:1.0=192.168.8.20   → gadget A always gets 192.168.8.20
 no static lease for 1-2:1.0           → gadget C gets an address from the pool
 ```
 
-Supported gadgets are those the host drives with `cdc_ether` (CDC ECM) or `cdc_eem`
-(CDC EEM). RNDIS (`rndis_host`) and NCM (`cdc_ncm`) gadgets are ignored.
+By default, gadgets the host drives with `cdc_ether` (CDC ECM) or `cdc_eem` (CDC EEM)
+are served. Set [`drivers`](docs/configuration.md#gadget-drivers) to serve others, such
+as `cdc_ncm` (NCM) or `rndis_host` (RNDIS).
 
 Active leases and the configuration are published on the system D-Bus for other
 programs to read.
@@ -61,7 +62,7 @@ programs to read.
 | Document | Contents |
 | --- | --- |
 | [Installation](docs/installation.md) | Requirements, installer script, manual installation, service settings, uninstalling |
-| [Configuration](docs/configuration.md) | Configuration keys, finding USB paths, custom DHCP options |
+| [Configuration](docs/configuration.md) | Configuration keys, gadget drivers, finding USB paths, custom DHCP options |
 | [Host bridge](docs/host-bridge.md) | What the daemon does to the bridge, other network managers, moving from systemd-networkd |
 | [Troubleshooting](docs/troubleshooting.md) | Health checks and common problems |
 | [D-Bus API](docs/dbus-api.md) | Properties, interface XML, lease change signals, Python listener |

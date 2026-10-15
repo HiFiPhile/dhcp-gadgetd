@@ -1,7 +1,8 @@
 # Host bridge
 
 The daemon owns one bridge (`gadget0` unless [`bridge`](configuration.md#keys) is set)
-and adds every cdc_ether/cdc_eem interface to it, so the host reaches all gadgets
+and adds every USB interface using one of the configured
+[`drivers`](configuration.md#gadget-drivers) to it, so the host reaches all gadgets
 through a single interface. At startup it:
 
 - creates the bridge, or adopts an existing interface of that name if it is a bridge
@@ -18,15 +19,19 @@ but the host cannot reach it.
 
 ## Other network managers
 
-Only the daemon may configure the bridge and its ports. The installed udev rule
-([90-dhcp-gadget.rules](../90-dhcp-gadget.rules)) marks gadget ports `NM_UNMANAGED`
-for NetworkManager and sets `ID_NET_MANAGED_BY=org.dhcp_gadget1` for
-systemd-networkd, so neither touches them. You still have to remove any
-systemd-networkd `.netdev`/`.network` file or NetworkManager profile for the bridge
-itself. Do not run another DHCP server on the bridge (networkd `DHCPServer=`, dnsmasq).
+Only the daemon may configure the bridge and its ports. The installed udev rule,
+generated from [90-dhcp-gadget.rules.in](../90-dhcp-gadget.rules.in) with the
+configured drivers, marks gadget ports `NM_UNMANAGED` for NetworkManager and sets
+`ID_NET_MANAGED_BY=org.dhcp_gadget1` for systemd-networkd, so neither touches them.
+The rule only follows `drivers` when it is regenerated; see
+[Gadget drivers](configuration.md#gadget-drivers).
 
-Host USB network adapters that use the `cdc_ether` driver are treated as gadget
-ports too.
+You still have to remove any systemd-networkd `.netdev`/`.network` file or
+NetworkManager profile for the bridge itself. Do not run another DHCP server on the
+bridge (networkd `DHCPServer=`, dnsmasq).
+
+Host USB network adapters that use a configured driver are treated as gadget ports
+too.
 
 ## Moving from a systemd-networkd bridge
 

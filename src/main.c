@@ -11,10 +11,12 @@ static volatile sig_atomic_t g_stop_requested = 0;
 typedef struct {
     const char *config_path;
     enum DgLogLevel log_level;
+    int print_drivers;
 } DgArgs;
 
 static void dg_print_usage(const char *prog) {
-    fprintf(stderr, "Usage: %s --config <path> [--log-level <debug|info|warn|error>]\n", prog);
+    fprintf(stderr, "Usage: %s --config <path> [--log-level <debug|info|warn|error>] [--print-drivers]\n", prog);
+    fprintf(stderr, "  --print-drivers  validate the config, print its gadget drivers one per line, and exit\n");
 }
 
 static void dg_on_signal(int signum) {
@@ -42,6 +44,7 @@ static int dg_parse_args(int argc, char **argv, DgArgs *out_args) {
 
     out_args->config_path = NULL;
     out_args->log_level = DG_LOG_INFO;
+    out_args->print_drivers = 0;
 
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--config") == 0) {
@@ -56,6 +59,10 @@ static int dg_parse_args(int argc, char **argv, DgArgs *out_args) {
                 return -1;
             }
             out_args->log_level = dg_log_parse_level(argv[++i]);
+            continue;
+        }
+        if (strcmp(argv[i], "--print-drivers") == 0) {
+            out_args->print_drivers = 1;
             continue;
         }
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
@@ -89,10 +96,18 @@ int main(int argc, char **argv) {
         return 0;
     }
 
-    dg_log_init(args.log_level);
+    /* The installer reads --print-drivers output; keep stderr to warnings and errors. */
+    dg_log_init(args.print_drivers ? DG_LOG_WARN : args.log_level);
 
     if (dg_config_load(args.config_path, &cfg) != 0) {
         return 1;
+    }
+    if (args.print_drivers) {
+        size_t i;
+        for (i = 0; i < cfg.driver_count; i++) {
+            puts(cfg.drivers[i]);
+        }
+        return 0;
     }
     if (dg_server_init(&server, &cfg) != 0) {
         return 1;

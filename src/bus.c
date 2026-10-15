@@ -111,6 +111,13 @@ static int append_config_array(sd_bus_message *reply, const DgConfig *cfg, const
             r = sd_bus_message_close_container(reply);
             if (r < 0) return r;
         }
+    } else if (strcmp(property, "Drivers") == 0) {
+        r = sd_bus_message_open_container(reply, 'a', "s");
+        if (r < 0) return r;
+        for (size_t i = 0; i < cfg->driver_count; i++) {
+            r = sd_bus_message_append(reply, "s", cfg->drivers[i]);
+            if (r < 0) return r;
+        }
     } else {
         r = sd_bus_message_open_container(reply, 'a', "(yay)");
         if (r < 0) return r;
@@ -160,7 +167,7 @@ static int get_property(sd_bus *connection, const char *path, const char *interf
     if (strcmp(property, "ConfigFile") == 0)
         return sd_bus_message_append(reply, "s", cfg->config_path);
     if (strcmp(property, "DNS") == 0 || strcmp(property, "StaticLeases") == 0 ||
-        strcmp(property, "CustomOptions") == 0)
+        strcmp(property, "CustomOptions") == 0 || strcmp(property, "Drivers") == 0)
         return append_config_array(reply, cfg, property);
 
     if (strcmp(property, "Leases") == 0) return append_leases(reply, bus);
@@ -194,6 +201,7 @@ static const sd_bus_vtable server_vtable[] = {
     SD_BUS_PROPERTY("StaticLeases", "a(say)", get_property, 0, SD_BUS_VTABLE_PROPERTY_CONST),
     SD_BUS_PROPERTY("CustomOptions", "a(yay)", get_property, 0, SD_BUS_VTABLE_PROPERTY_CONST),
     SD_BUS_PROPERTY("Bridge", "s", get_property, 0, SD_BUS_VTABLE_PROPERTY_CONST),
+    SD_BUS_PROPERTY("Drivers", "as", get_property, 0, SD_BUS_VTABLE_PROPERTY_CONST),
     SD_BUS_PROPERTY("ConfigFile", "s", get_property, 0, SD_BUS_VTABLE_PROPERTY_CONST),
     SD_BUS_VTABLE_END
 };

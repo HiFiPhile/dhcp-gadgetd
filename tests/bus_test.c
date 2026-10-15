@@ -193,6 +193,13 @@ static void check_config(const DgConfig *cfg) {
     reply = property("Bridge", "s");
     assert(sd_bus_message_read(reply, "s", &text) > 0 && strcmp(text, cfg->bridge_name) == 0);
     sd_bus_message_unref(reply);
+    reply = property("Drivers", "as");
+    assert(sd_bus_message_enter_container(reply, 'a', "s") > 0);
+    for (size_t i = 0; i < cfg->driver_count; i++) {
+        assert(sd_bus_message_read(reply, "s", &text) > 0 && strcmp(text, cfg->drivers[i]) == 0);
+    }
+    assert(sd_bus_message_at_end(reply, 0) > 0);
+    sd_bus_message_unref(reply);
     reply = property("DNS", "aay");
     assert(sd_bus_message_enter_container(reply, 'a', "ay") > 0);
     for (size_t i = 0; i < cfg->dns_count; i++) check_bytes(reply, &cfg->dns[i], 4);
@@ -251,6 +258,9 @@ int main(void) {
     cfg.subnet_prefix = 24;
     strcpy(cfg.config_path, "/etc/dhcp-gadget/config.conf");
     strcpy(cfg.bridge_name, "gadget0");
+    strcpy(cfg.drivers[0], "cdc_ether");
+    strcpy(cfg.drivers[1], "cdc_eem");
+    cfg.driver_count = 2;
     assert(dg_allocator_init(&allocator, &cfg) == 0);
     assert(sd_bus_open_user(&connection) >= 0);
     assert(sd_bus_open_user(&client) >= 0);

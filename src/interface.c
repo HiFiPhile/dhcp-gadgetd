@@ -21,6 +21,8 @@
 
 static DgInterfaceEntry g_entries[DG_MAX_INTERFACES];
 static size_t g_entry_count = 0;
+static char g_drivers[DG_MAX_DRIVERS][DG_MAX_DRIVER_NAME_LEN];
+static size_t g_driver_count = 0;
 
 /*
  * Classic socket BPF for AF_PACKET/SOCK_DGRAM sockets:
@@ -227,7 +229,13 @@ static const char *dg_path_basename(const char *path) {
 }
 
 static int dg_is_supported_driver(const char *driver_name) {
-    return strcmp(driver_name, "cdc_ether") == 0 || strcmp(driver_name, "cdc_eem") == 0;
+    size_t i;
+    for (i = 0; i < g_driver_count; i++) {
+        if (strcmp(driver_name, g_drivers[i]) == 0) {
+            return 1;
+        }
+    }
+    return 0;
 }
 
 static int dg_extract_usb_path(const char *device_link, char *out_usb_path, size_t out_size) {
@@ -384,12 +392,15 @@ static int dg_fill_interface_entry(const char *ifname,
     return 0;
 }
 
-int dg_interface_init(void) {
+int dg_interface_init(const DgConfig *cfg) {
     DIR *dir;
     struct dirent *de;
     DgInterfaceEntry next[DG_MAX_INTERFACES];
     size_t next_count = 0;
     size_t i;
+
+    memcpy(g_drivers, cfg->drivers, sizeof(g_drivers));
+    g_driver_count = cfg->driver_count;
 
     dir = opendir("/sys/class/net");
     if (dir == NULL) {

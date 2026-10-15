@@ -30,6 +30,7 @@ name before declaring the daemon ready and restarts it if the bus disconnects.
 | StaticLeases | `a(say)` | Configured USB path and IPv4 address pairs, including unused reservations |
 | CustomOptions | `a(yay)` | Only explicitly configured custom option codes and raw payloads |
 | Bridge | `s` | Name of the bridge carrying the gadget ports |
+| Drivers | `as` | Host network drivers whose interfaces are treated as gadget ports |
 | ConfigFile | `s` | Configuration file path supplied to the daemon |
 
 All configuration properties reflect the loaded configuration, including defaults,

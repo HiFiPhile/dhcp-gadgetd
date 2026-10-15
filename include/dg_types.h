@@ -12,6 +12,8 @@
 #define DG_MAX_PATH_LEN 256
 #define DG_MAX_STATIC_LEASES 128
 #define DG_MAX_IFNAME_LEN 16 /* IFNAMSIZ, including the terminating NUL */
+#define DG_MAX_DRIVERS 8
+#define DG_MAX_DRIVER_NAME_LEN 32
 
 typedef struct {
     uint8_t code;
@@ -45,6 +47,8 @@ typedef struct {
     DgStaticLease static_leases[DG_MAX_STATIC_LEASES];
     size_t static_lease_count;
     char bridge_name[DG_MAX_IFNAME_LEN];
+    char drivers[DG_MAX_DRIVERS][DG_MAX_DRIVER_NAME_LEN];
+    size_t driver_count;
     char config_path[DG_MAX_PATH_LEN];
 } DgConfig;
 

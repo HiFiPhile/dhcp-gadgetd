@@ -52,7 +52,7 @@ int dg_server_init(DgServer *server, const DgConfig *cfg) {
         return -1;
     }
 
-    if (dg_interface_init() != 0) {
+    if (dg_interface_init(cfg) != 0) {
         dg_log(DG_LOG_WARN, "initial interface scan returned error");
     }
     for (i = 0; i < dg_interface_count(); i++) {

@@ -1,3 +1,0 @@
-# dhcp-gadgetd adds every cdc_ether/cdc_eem interface to its bridge.
-# Keep NetworkManager and systemd-networkd from configuring those ports.
-ACTION!="remove", SUBSYSTEM=="net", ENV{ID_NET_DRIVER}=="cdc_ether|cdc_eem", ENV{NM_UNMANAGED}="1", ENV{ID_NET_MANAGED_BY}="org.dhcp_gadget1"

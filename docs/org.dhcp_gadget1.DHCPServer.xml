@@ -75,6 +75,10 @@
   <property name="Bridge" type="s" access="read">
    <annotation name="org.freedesktop.DBus.Property.EmitsChangedSignal" value="const"/>
   </property>
+  <!-- Host network drivers whose interfaces are treated as gadget ports. -->
+  <property name="Drivers" type="as" access="read">
+   <annotation name="org.freedesktop.DBus.Property.EmitsChangedSignal" value="const"/>
+  </property>
   <!-- Path of the configuration file the daemon loaded. -->
   <property name="ConfigFile" type="s" access="read">
    <annotation name="org.freedesktop.DBus.Property.EmitsChangedSignal" value="const"/>

@@ -100,11 +100,33 @@ static void test_bridge_name(void) {
     assert(load_text("bridge=..\n", &cfg) != 0);
 }
 
+static void test_drivers(void) {
+    DgConfig cfg;
+
+    assert(load_text("", &cfg) == 0);
+    assert(cfg.driver_count == 2);
+    assert(strcmp(cfg.drivers[0], "cdc_ether") == 0 && strcmp(cfg.drivers[1], "cdc_eem") == 0);
+    assert(load_text("drivers=cdc_ncm, rndis_host\n", &cfg) == 0);
+    assert(cfg.driver_count == 2);
+    assert(strcmp(cfg.drivers[0], "cdc_ncm") == 0 && strcmp(cfg.drivers[1], "rndis_host") == 0);
+    assert(load_text("drivers=cdc_ether\ndrivers=ax88179_178a\n", &cfg) == 0);
+    assert(cfg.driver_count == 1 && strcmp(cfg.drivers[0], "ax88179_178a") == 0);
+    assert(load_text("drivers=a,b,c,d,e,f,g,h\n", &cfg) == 0 && cfg.driver_count == DG_MAX_DRIVERS);
+    assert(load_text("drivers=a,b,c,d,e,f,g,h,i\n", &cfg) != 0);
+    assert(load_text("drivers=0123456789012345678901234567890\n", &cfg) == 0);
+    assert(load_text("drivers=01234567890123456789012345678901\n", &cfg) != 0);
+    assert(load_text("drivers=cdc_ether,cdc_ether\n", &cfg) != 0);
+    assert(load_text("drivers=cdc_*\n", &cfg) != 0);
+    assert(load_text("drivers=cdc_ether|cdc_eem\n", &cfg) != 0);
+    assert(load_text("drivers=,\n", &cfg) != 0);
+}
+
 int main(void) {
     test_custom_options_load();
     test_invalid_custom_options_fail();
     test_custom_option_size_limits();
     test_bridge_name();
+    test_drivers();
     puts("config tests passed");
     return 0;
 }
