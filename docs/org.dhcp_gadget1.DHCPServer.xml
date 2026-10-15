@@ -1,0 +1,83 @@
+<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN"
+"https://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
+<!--
+  dhcp-gadgetd D-Bus interface: bus name org.dhcp_gadget1 on the system bus,
+  object path /org/dhcp_gadget1. All properties are read-only. IPv4 values of
+  type ay are 4 bytes in network order. Details: dbus-api.md.
+
+  tests/bus_test.c fails when this interface and the daemon's introspection data
+  differ; comments and whitespace are ignored.
+-->
+<node name="/org/dhcp_gadget1">
+ <interface name="org.dhcp_gadget1.DHCPServer">
+  <!-- Active acknowledged leases as (address family, client ID, address, gateway,
+       MAC, expiry in CLOCK_MONOTONIC microseconds). Without an annotation,
+       EmitsChangedSignal defaults to true: changes emit PropertiesChanged. -->
+  <property name="Leases" type="a(uayayayayt)" access="read">
+  </property>
+  <!-- DHCP options sent in OFFER and ACK as (code, payload), in wire order. -->
+  <property name="Options" type="a(yay)" access="read">
+   <annotation name="org.freedesktop.DBus.Property.EmitsChangedSignal" value="const"/>
+  </property>
+  <!-- Number of addresses in the dynamic pool. -->
+  <property name="PoolSize" type="u" access="read">
+   <annotation name="org.freedesktop.DBus.Property.EmitsChangedSignal" value="const"/>
+  </property>
+  <!-- Offset of the pool start from the subnet network address. -->
+  <property name="PoolOffset" type="u" access="read">
+   <annotation name="org.freedesktop.DBus.Property.EmitsChangedSignal" value="const"/>
+  </property>
+  <!-- Server address, also carried by the bridge. -->
+  <property name="ServerAddress" type="ay" access="read">
+   <annotation name="org.freedesktop.DBus.Property.EmitsChangedSignal" value="const"/>
+  </property>
+  <!-- Subnet network address. -->
+  <property name="SubnetAddress" type="ay" access="read">
+   <annotation name="org.freedesktop.DBus.Property.EmitsChangedSignal" value="const"/>
+  </property>
+  <!-- Subnet mask. -->
+  <property name="SubnetMask" type="ay" access="read">
+   <annotation name="org.freedesktop.DBus.Property.EmitsChangedSignal" value="const"/>
+  </property>
+  <!-- Subnet prefix length in bits. -->
+  <property name="SubnetPrefixLength" type="y" access="read">
+   <annotation name="org.freedesktop.DBus.Property.EmitsChangedSignal" value="const"/>
+  </property>
+  <!-- Router address; empty when not configured. -->
+  <property name="Router" type="ay" access="read">
+   <annotation name="org.freedesktop.DBus.Property.EmitsChangedSignal" value="const"/>
+  </property>
+  <!-- DNS server addresses in configured order; empty when not configured. -->
+  <property name="DNS" type="aay" access="read">
+   <annotation name="org.freedesktop.DBus.Property.EmitsChangedSignal" value="const"/>
+  </property>
+  <!-- First dynamic pool address. -->
+  <property name="PoolStart" type="ay" access="read">
+   <annotation name="org.freedesktop.DBus.Property.EmitsChangedSignal" value="const"/>
+  </property>
+  <!-- Last dynamic pool address. -->
+  <property name="PoolEnd" type="ay" access="read">
+   <annotation name="org.freedesktop.DBus.Property.EmitsChangedSignal" value="const"/>
+  </property>
+  <!-- Lease duration in seconds. -->
+  <property name="LeaseTime" type="u" access="read">
+   <annotation name="org.freedesktop.DBus.Property.EmitsChangedSignal" value="const"/>
+  </property>
+  <!-- Configured (USB path, address) reservations, whether in use or not. -->
+  <property name="StaticLeases" type="a(say)" access="read">
+   <annotation name="org.freedesktop.DBus.Property.EmitsChangedSignal" value="const"/>
+  </property>
+  <!-- Configured custom options as (code, payload). -->
+  <property name="CustomOptions" type="a(yay)" access="read">
+   <annotation name="org.freedesktop.DBus.Property.EmitsChangedSignal" value="const"/>
+  </property>
+  <!-- Name of the bridge carrying the gadget ports. -->
+  <property name="Bridge" type="s" access="read">
+   <annotation name="org.freedesktop.DBus.Property.EmitsChangedSignal" value="const"/>
+  </property>
+  <!-- Path of the configuration file the daemon loaded. -->
+  <property name="ConfigFile" type="s" access="read">
+   <annotation name="org.freedesktop.DBus.Property.EmitsChangedSignal" value="const"/>
+  </property>
+ </interface>
+</node>

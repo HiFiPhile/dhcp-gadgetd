@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <arpa/inet.h>
+#include <ctype.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -79,6 +80,42 @@ static void check_bytes(sd_bus_message *reply, const void *expected, size_t size
     assert(sd_bus_message_read_array(reply, 'y', &bytes, &length) > 0);
     assert(length == size);
     if (size) assert(memcmp(bytes, expected, size) == 0);
+}
+
+/* Copies the DG_BUS_INTERFACE element without comments or whitespace. */
+static void canonical_interface(const char *xml, char *out, size_t size) {
+    const char *p = strstr(xml, "<interface name=\"" DG_BUS_INTERFACE "\">");
+    const char *end = p ? strstr(p, "</interface>") : NULL;
+    size_t n = 0;
+
+    assert(p && end);
+    for (; p < end; p++) {
+        if (strncmp(p, "<!--", 4) == 0) {
+            p = strstr(p, "-->");
+            assert(p && p < end);
+            p += 2;
+        } else if (!isspace((unsigned char)*p)) {
+            assert(n + 1 < size);
+            out[n++] = *p;
+        }
+    }
+    out[n] = '\0';
+}
+
+/* The published interface XML must match what the daemon introspects. */
+static void check_interface_xml(const char *introspected) {
+    static char file[16384], expected[8192], actual[8192];
+    FILE *fh = fopen("docs/" DG_BUS_INTERFACE ".xml", "r");
+    size_t length;
+
+    assert(fh);
+    length = fread(file, 1, sizeof(file) - 1, fh);
+    assert(length > 0 && feof(fh));
+    file[length] = '\0';
+    fclose(fh);
+    canonical_interface(file, expected, sizeof(expected));
+    canonical_interface(introspected, actual, sizeof(actual));
+    assert(strcmp(expected, actual) == 0);
 }
 
 static void check_lease(struct in_addr ip, const uint8_t *mac, const uint8_t *id,
@@ -225,6 +262,7 @@ int main(void) {
     reply = call("org.freedesktop.DBus.Introspectable", "Introspect", NULL);
     assert(sd_bus_message_read(reply, "s", &xml) > 0);
     assert(strstr(xml, "a(uayayayayt)") && strstr(xml, "a(yay)"));
+    check_interface_xml(xml);
     sd_bus_message_unref(reply);
     reply = property("PoolSize", "u");
     assert(sd_bus_message_read(reply, "u", &value) > 0 && value == 101);
