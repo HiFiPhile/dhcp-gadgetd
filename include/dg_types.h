@@ -11,6 +11,7 @@
 #define DG_MAX_CUSTOM_OPTIONS_ENCODED_LEN 262
 #define DG_MAX_PATH_LEN 256
 #define DG_MAX_STATIC_LEASES 128
+#define DG_MAX_IFNAME_LEN 16 /* IFNAMSIZ, including the terminating NUL */
 
 typedef struct {
     uint8_t code;
@@ -43,6 +44,7 @@ typedef struct {
     DgPool pool;
     DgStaticLease static_leases[DG_MAX_STATIC_LEASES];
     size_t static_lease_count;
+    char bridge_name[DG_MAX_IFNAME_LEN];
     char config_path[DG_MAX_PATH_LEN];
 } DgConfig;
 

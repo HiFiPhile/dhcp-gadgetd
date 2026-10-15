@@ -155,6 +155,8 @@ static int get_property(sd_bus *connection, const char *path, const char *interf
         return sd_bus_message_append_array(reply, 'y', &cfg->pool.end, 4);
     if (strcmp(property, "LeaseTime") == 0)
         return sd_bus_message_append(reply, "u", cfg->pool.lease_seconds);
+    if (strcmp(property, "Bridge") == 0)
+        return sd_bus_message_append(reply, "s", cfg->bridge_name);
     if (strcmp(property, "ConfigFile") == 0)
         return sd_bus_message_append(reply, "s", cfg->config_path);
     if (strcmp(property, "DNS") == 0 || strcmp(property, "StaticLeases") == 0 ||
@@ -191,6 +193,7 @@ static const sd_bus_vtable server_vtable[] = {
     SD_BUS_PROPERTY("LeaseTime", "u", get_property, 0, SD_BUS_VTABLE_PROPERTY_CONST),
     SD_BUS_PROPERTY("StaticLeases", "a(say)", get_property, 0, SD_BUS_VTABLE_PROPERTY_CONST),
     SD_BUS_PROPERTY("CustomOptions", "a(yay)", get_property, 0, SD_BUS_VTABLE_PROPERTY_CONST),
+    SD_BUS_PROPERTY("Bridge", "s", get_property, 0, SD_BUS_VTABLE_PROPERTY_CONST),
     SD_BUS_PROPERTY("ConfigFile", "s", get_property, 0, SD_BUS_VTABLE_PROPERTY_CONST),
     SD_BUS_VTABLE_END
 };

@@ -9,6 +9,7 @@ DHCP Gadget is a Linux-focused C daemon for USB gadget networking. It assigns st
 - Resolve USB interface path values such as 1-2:1.0
 - Allocate static DHCP address by USB path
 - Fallback to dynamic lease pool
+- Bridge all gadget ports and carry the server address on the bridge
 - Publish active leases and DHCP options over the system D-Bus
 - Structured log output with configurable level
 
@@ -24,11 +25,18 @@ make test
 
 This builds dhcp-gadgetd in the repository root.
 
+The bridge test runs in a throwaway network namespace through `unshare -rn`, which
+needs unprivileged user namespaces. Where they are blocked (for example Ubuntu 24.04
+AppArmor defaults), run `make test NETNS="sudo unshare -n"`.
+
 ## Run
 
 ```bash
 sudo ./dhcp-gadgetd --config config.example.conf --log-level debug
 ```
+
+Running the daemon, even manually, creates or adopts the host bridge described in
+[Host bridge](#host-bridge).
 
 Supported log levels are debug, info, warn, and error. Install the D-Bus policy
 with the service installer before running manually. The daemon requires access
@@ -49,12 +57,14 @@ This installs:
 - service env file in /etc/default/dhcp-gadget from dhcp-gadget.env (only if missing)
 - unit file in /etc/systemd/system/dhcp-gadget.service
 - D-Bus policy in /etc/dbus-1/system.d/org.dhcp_gadget1.conf
+- udev rule in /etc/udev/rules.d/90-dhcp-gadget.rules that keeps NetworkManager and
+  systemd-networkd off gadget ports (see [Host bridge](#host-bridge))
 - dedicated system user/group `dhcp-gadget` via `systemd-sysusers`
 
 Installation stops an existing service before creating its permanent account
 and restarts it after installation, including when upgrading from `DynamicUser`.
 Uninstallation
-removes the D-Bus policy but retains the system account.
+removes the D-Bus policy, the udev rule, and the bridge but retains the system account.
 
 Manage service:
 
@@ -64,8 +74,9 @@ sudo systemctl restart dhcp-gadget.service
 sudo journalctl -u dhcp-gadget.service -f
 ```
 
-The service is capability-limited for raw DHCP handling:
+The service is capability-limited for raw DHCP handling and bridge management:
 
+- CAP_NET_ADMIN
 - CAP_NET_RAW
 - CAP_NET_BIND_SERVICE
 
@@ -87,6 +98,34 @@ Uninstall and purge config and env files:
 ```bash
 sudo ./uninstall-systemd.sh --purge
 ```
+
+## Host bridge
+
+The daemon owns one bridge, `gadget0` unless `bridge` is configured, and adds every
+cdc_ether/cdc_eem interface to it, so the host reaches all gadgets through a single
+interface. At startup it:
+
+- creates the bridge, or adopts an existing interface of that name if it is a bridge
+- sets a stable MAC derived from `/etc/machine-id`; otherwise the bridge copies the
+  lowest port MAC, which changes as gadgets come and go
+- brings the bridge up and makes `server_ip` with the subnet prefix its only IPv4
+  address, removing any other IPv4 address on it
+- adds every gadget port to the bridge and brings it up; hotplugged ports follow
+
+Stopping the daemon keeps the bridge so clients survive restarts; uninstalling
+deletes it. A failure to create or configure the bridge fails startup. A port that
+cannot join the bridge is logged and still served, but the host cannot reach it.
+
+Do not let another network manager configure the bridge or its ports. The installed
+udev rule marks gadget ports `NM_UNMANAGED` for NetworkManager and sets
+`ID_NET_MANAGED_BY=org.dhcp_gadget1` for systemd-networkd. Remove any existing
+systemd-networkd `.netdev`/`.network` or NetworkManager profile for the bridge name.
+Any host USB network adapter that uses the cdc_ether driver is treated as a gadget
+port too.
+
+DHCP packets are read from each port, not from the bridge, so static leases by USB
+path keep working. Port sockets bind with `ETH_P_ALL` because the bridge consumes
+frames before protocol-specific packet sockets see them.
 
 ## D-Bus API
 
@@ -113,6 +152,7 @@ interfaces are provided by sd-bus.
 | LeaseTime | `u` | Configured lease duration in seconds |
 | StaticLeases | `a(say)` | Configured USB path and IPv4 address pairs, including unused reservations |
 | CustomOptions | `a(yay)` | Only explicitly configured custom option codes and raw payloads |
+| Bridge | `s` | Name of the bridge carrying the gadget ports |
 | ConfigFile | `s` | Configuration file path supplied to the daemon |
 
 All configuration properties reflect the loaded configuration, including defaults,
@@ -189,6 +229,7 @@ server_ip=192.168.8.1
 router=192.168.8.1
 lease_time=86400
 dns=1.1.1.1,8.8.8.8
+bridge=gadget0
 
 # Repeatable key
 static_lease=1-2:1.0=192.168.8.10
@@ -202,6 +243,8 @@ custom_option=224=01:02:ff
 Use key=value lines, one per setting. Empty lines and lines starting with #, ;, or // are ignored.
 router is optional. If omitted, the DHCP router option is not sent.
 dns is optional. If omitted, the DHCP DNS option is not sent.
+bridge is optional and names the bridge the daemon manages; it defaults to `gadget0`.
+It must be a valid interface name: at most 15 characters, without `/`, `:`, or whitespace.
 custom_option is optional and repeatable. Its value is a decimal DHCP option code,
 followed by `=`, followed by one or more colon-separated hexadecimal bytes. Custom
 options are included in DHCP OFFER and ACK replies. Codes 0 and 255, codes managed

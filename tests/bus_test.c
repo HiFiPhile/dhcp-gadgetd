@@ -153,6 +153,9 @@ static void check_config(const DgConfig *cfg) {
     reply = property("ConfigFile", "s");
     assert(sd_bus_message_read(reply, "s", &text) > 0 && strcmp(text, cfg->config_path) == 0);
     sd_bus_message_unref(reply);
+    reply = property("Bridge", "s");
+    assert(sd_bus_message_read(reply, "s", &text) > 0 && strcmp(text, cfg->bridge_name) == 0);
+    sd_bus_message_unref(reply);
     reply = property("DNS", "aay");
     assert(sd_bus_message_enter_container(reply, 'a', "ay") > 0);
     for (size_t i = 0; i < cfg->dns_count; i++) check_bytes(reply, &cfg->dns[i], 4);
@@ -210,6 +213,7 @@ int main(void) {
     cfg.pool.lease_seconds = 60;
     cfg.subnet_prefix = 24;
     strcpy(cfg.config_path, "/etc/dhcp-gadget/config.conf");
+    strcpy(cfg.bridge_name, "gadget0");
     assert(dg_allocator_init(&allocator, &cfg) == 0);
     assert(sd_bus_open_user(&connection) >= 0);
     assert(sd_bus_open_user(&client) >= 0);

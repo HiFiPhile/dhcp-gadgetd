@@ -146,7 +146,10 @@ static int dg_open_bound_socket(int ifindex) {
 
     memset(&bind_addr, 0, sizeof(bind_addr));
     bind_addr.sll_family = AF_PACKET;
-    /* Need to be ETH_P_ALL, strange */
+    /*
+     * Must be ETH_P_ALL: ports are bridged, and the bridge consumes frames before
+     * protocol-specific (ETH_P_IP) packet sockets see them. ETH_P_ALL taps run first.
+     */
     bind_addr.sll_protocol = htons(ETH_P_ALL);
     bind_addr.sll_ifindex = ifindex;
 

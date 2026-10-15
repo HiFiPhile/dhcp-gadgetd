@@ -6,3 +6,4 @@ __pycache__/
 tests/config_test
 tests/bus_test
 tests/proto_test
+tests/bridge_test

@@ -111,6 +111,24 @@ static int dg_parse_subnet_cidr_string(const char *text, struct in_addr *out_net
     return 0;
 }
 
+/* Same rules as the kernel's dev_valid_name(). */
+static int dg_parse_ifname(const char *text, char *out, size_t out_size) {
+    size_t len = strlen(text);
+    size_t i;
+
+    if (len == 0U || len >= out_size || strcmp(text, ".") == 0 || strcmp(text, "..") == 0) {
+        return -1;
+    }
+    for (i = 0; i < len; i++) {
+        if (text[i] == '/' || text[i] == ':' || isspace((unsigned char)text[i])) {
+            return -1;
+        }
+    }
+
+    memcpy(out, text, len + 1U);
+    return 0;
+}
+
 static int dg_ipv4_in_subnet(struct in_addr ip, struct in_addr network, struct in_addr mask) {
     return (dg_ipv4_to_u32(ip) & dg_ipv4_to_u32(mask)) == dg_ipv4_to_u32(network);
 }
@@ -530,6 +548,11 @@ static int dg_parse_config_text(char *text, DgConfig *cfg) {
                 dg_log(DG_LOG_ERROR, "config parse error at line %zu: invalid custom_option entry", line_no);
                 return -1;
             }
+        } else if (strcmp(key, "bridge") == 0) {
+            if (dg_parse_ifname(value, cfg->bridge_name, sizeof(cfg->bridge_name)) != 0) {
+                dg_log(DG_LOG_ERROR, "config parse error at line %zu: invalid bridge interface name", line_no);
+                return -1;
+            }
         } else {
             dg_log(DG_LOG_ERROR, "config parse error at line %zu: unknown key '%s'", line_no, key);
             return -1;
@@ -578,6 +601,7 @@ void dg_config_set_defaults(DgConfig *out_cfg) {
     out_cfg->dns_count = 0;
     out_cfg->custom_option_count = 0;
     out_cfg->static_lease_count = 0;
+    strcpy(out_cfg->bridge_name, "gadget0");
 }
 
 int dg_config_load(const char *path, DgConfig *out_cfg) {
@@ -612,8 +636,8 @@ int dg_config_load(const char *path, DgConfig *out_cfg) {
     }
 
     free(text);
-    dg_log(DG_LOG_INFO, "config loaded: lease_time=%u static_leases=%zu dns=%zu custom_options=%zu",
-           out_cfg->pool.lease_seconds, out_cfg->static_lease_count, out_cfg->dns_count,
+    dg_log(DG_LOG_INFO, "config loaded: bridge=%s lease_time=%u static_leases=%zu dns=%zu custom_options=%zu",
+           out_cfg->bridge_name, out_cfg->pool.lease_seconds, out_cfg->static_lease_count, out_cfg->dns_count,
            out_cfg->custom_option_count);
 
     for (i = 0; i < out_cfg->static_lease_count; i++) {

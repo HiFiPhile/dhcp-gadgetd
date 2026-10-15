@@ -6,6 +6,7 @@
 #include <sys/socket.h>
 #include <time.h>
 
+#include "bridge.h"
 #include "dhcp_proto.h"
 #include "hotplug.h"
 #include "interface.h"
@@ -37,6 +38,8 @@ static uint64_t dg_now_monotonic_ms(void) {
 }
 
 int dg_server_init(DgServer *server, const DgConfig *cfg) {
+    size_t i;
+
     if (server == NULL || cfg == NULL) {
         return -1;
     }
@@ -44,11 +47,21 @@ int dg_server_init(DgServer *server, const DgConfig *cfg) {
     memset(server, 0, sizeof(*server));
     server->config = *cfg;
 
+    if (dg_bridge_init(cfg) != 0) {
+        dg_log(DG_LOG_ERROR, "server init failed: bridge");
+        return -1;
+    }
+
     if (dg_interface_init() != 0) {
         dg_log(DG_LOG_WARN, "initial interface scan returned error");
     }
+    for (i = 0; i < dg_interface_count(); i++) {
+        const DgInterfaceEntry *iface = dg_interface_get(i);
+        (void)dg_bridge_add_port(iface->ifindex, iface->ifname);
+    }
 
     if (dg_allocator_init(&server->allocator, cfg) != 0) {
+        dg_bridge_shutdown();
         dg_log(DG_LOG_ERROR, "server init failed: allocator");
         return -1;
     }
@@ -56,6 +69,7 @@ int dg_server_init(DgServer *server, const DgConfig *cfg) {
     if (dg_dhcp_proto_init(cfg, server->allocator) != 0) {
         dg_allocator_cleanup(server->allocator);
         server->allocator = NULL;
+        dg_bridge_shutdown();
         dg_log(DG_LOG_ERROR, "server init failed: dhcp protocol");
         return -1;
     }
@@ -64,6 +78,7 @@ int dg_server_init(DgServer *server, const DgConfig *cfg) {
         dg_dhcp_proto_shutdown();
         dg_allocator_cleanup(server->allocator);
         server->allocator = NULL;
+        dg_bridge_shutdown();
         dg_log(DG_LOG_ERROR, "server init failed: hotplug");
         return -1;
     }
@@ -185,6 +200,7 @@ int dg_server_tick(DgServer *server, int timeout_ms) {
             if (evt.action == DG_HOTPLUG_ADD || evt.action == DG_HOTPLUG_MOVE) {
                 if (dg_interface_upsert(&evt) == 0) {
                     dg_log(DG_LOG_DEBUG, "hotplug upserted interface: if=%s idx=%d", evt.ifname, evt.ifindex);
+                    (void)dg_bridge_add_port(evt.ifindex, evt.ifname);
                 } else {
                     dg_log(DG_LOG_DEBUG,
                            "skip hotplug add/move: interface upsert rejected if=%s idx=%d driver=%s devpath=%s",
@@ -231,5 +247,6 @@ void dg_server_shutdown(DgServer *server) {
     server->allocator = NULL;
     dg_hotplug_shutdown();
     dg_dhcp_proto_shutdown();
+    dg_bridge_shutdown();
     dg_log(DG_LOG_INFO, "server shutdown complete");
 }

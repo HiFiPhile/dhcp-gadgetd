@@ -34,7 +34,7 @@ if [[ ! -f "${SCRIPT_DIR}/config.example.conf" ]]; then
   exit 1
 fi
 
-for file in dhcp-gadget.sysusers org.dhcp_gadget1.conf; do
+for file in dhcp-gadget.sysusers org.dhcp_gadget1.conf 90-dhcp-gadget.rules; do
   if [[ ! -f "${SCRIPT_DIR}/${file}" ]]; then
     echo "${file} not found next to installer script." >&2
     exit 1
@@ -57,6 +57,12 @@ fi
 install -d -m 0755 /etc/dbus-1/system.d
 install -m 0644 "${SCRIPT_DIR}/org.dhcp_gadget1.conf" /etc/dbus-1/system.d/org.dhcp_gadget1.conf
 busctl call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus ReloadConfig
+
+install -m 0644 "${SCRIPT_DIR}/90-dhcp-gadget.rules" /etc/udev/rules.d/90-dhcp-gadget.rules
+udevadm control --reload
+# Apply the rule to gadget ports that are already plugged in.
+udevadm trigger --action=change --subsystem-match=net \
+  --property-match=ID_NET_DRIVER=cdc_ether --property-match=ID_NET_DRIVER=cdc_eem
 
 install -d -m 0755 "${APP_DIR}"
 install -d -m 0755 "${CONFIG_DIR}"

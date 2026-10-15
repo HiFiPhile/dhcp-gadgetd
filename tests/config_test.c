@@ -85,10 +85,26 @@ static void test_custom_option_size_limits(void) {
     assert(load_text(suffix, &cfg) != 0);
 }
 
+static void test_bridge_name(void) {
+    DgConfig cfg;
+
+    assert(load_text("", &cfg) == 0);
+    assert(strcmp(cfg.bridge_name, "gadget0") == 0);
+    assert(load_text("bridge=br-gadget\n", &cfg) == 0);
+    assert(strcmp(cfg.bridge_name, "br-gadget") == 0);
+    assert(load_text("bridge=0123456789abcde\n", &cfg) == 0);
+    assert(load_text("bridge=0123456789abcdef\n", &cfg) != 0);
+    assert(load_text("bridge=a/b\n", &cfg) != 0);
+    assert(load_text("bridge=a:b\n", &cfg) != 0);
+    assert(load_text("bridge=a b\n", &cfg) != 0);
+    assert(load_text("bridge=..\n", &cfg) != 0);
+}
+
 int main(void) {
     test_custom_options_load();
     test_invalid_custom_options_fail();
     test_custom_option_size_limits();
+    test_bridge_name();
     puts("config tests passed");
     return 0;
 }
