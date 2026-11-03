@@ -30,10 +30,12 @@ the line (`config parse error at line N`).
 
 Address rules:
 
-- `server_ip`, `router`, the pool, and every static lease address must be inside `subnet`.
+- `server_ip`, `router`, the pool, and every static lease address must be host addresses
+  of `subnet`: inside it, and not its network or broadcast address (a /31 or /32 has
+  neither, so all of its addresses qualify).
+- `server_ip` and `router` must be outside the pool, so the pool never hands them out.
 - Static lease addresses must be outside the pool and differ from `server_ip` and `router`.
-  Each USB path and each address may appear only once.
-- Keep `server_ip` and `router` outside the pool, so the pool never hands them out.
+  Each USB path, at most 255 characters, and each address may appear only once.
 
 `bridge` must be a valid interface name: at most 15 characters, without `/`, `:`, or
 whitespace.

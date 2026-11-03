@@ -92,6 +92,10 @@ static int dg_parse_subnet_cidr_string(const char *text, struct in_addr *out_net
         return -1;
     }
 
+    /* strtoul() would read "" as 0 and accept a sign or leading space. */
+    if (!isdigit((unsigned char)*slash)) {
+        return -1;
+    }
     errno = 0;
     prefix_num = strtoul(slash, &endptr, 10);
     if (errno != 0 || *endptr != '\0' || prefix_num > 32UL) {
@@ -129,8 +133,15 @@ static int dg_parse_ifname(const char *text, char *out, size_t out_size) {
     return 0;
 }
 
-static int dg_ipv4_in_subnet(struct in_addr ip, struct in_addr network, struct in_addr mask) {
-    return (dg_ipv4_to_u32(ip) & dg_ipv4_to_u32(mask)) == dg_ipv4_to_u32(network);
+/* Inside the subnet and not its network or broadcast address; /31 and /32 have neither (RFC 3021). */
+static int dg_ipv4_is_subnet_host(const DgConfig *cfg, struct in_addr ip) {
+    uint32_t ip_u32 = dg_ipv4_to_u32(ip);
+    uint32_t mask_u32 = dg_ipv4_to_u32(cfg->subnet_mask);
+
+    if ((ip_u32 & mask_u32) != dg_ipv4_to_u32(cfg->subnet_network)) {
+        return 0;
+    }
+    return cfg->subnet_prefix >= 31U || ((ip_u32 & ~mask_u32) != 0U && (ip_u32 | mask_u32) != 0xFFFFFFFFU);
 }
 
 static int dg_read_file_bytes(const char *path, char **out_buf, size_t *out_len) {
@@ -309,6 +320,7 @@ static int dg_parse_static_lease(char *value_text, DgConfig *cfg) {
     char *usb_path;
     char *ip_text;
     struct in_addr lease_ip;
+    int n;
 
     sep = strchr(value_text, '=');
     if (sep == NULL) {
@@ -331,8 +343,9 @@ static int dg_parse_static_lease(char *value_text, DgConfig *cfg) {
     if (cfg->static_lease_count >= DG_MAX_STATIC_LEASES) {
         return -1;
     }
-    if (snprintf(cfg->static_leases[cfg->static_lease_count].usb_path,
-                 sizeof(cfg->static_leases[cfg->static_lease_count].usb_path), "%s", usb_path) < 0) {
+    n = snprintf(cfg->static_leases[cfg->static_lease_count].usb_path,
+                 sizeof(cfg->static_leases[cfg->static_lease_count].usb_path), "%s", usb_path);
+    if (n < 0 || (size_t)n >= sizeof(cfg->static_leases[cfg->static_lease_count].usb_path)) {
         return -1;
     }
     cfg->static_leases[cfg->static_lease_count].ip = lease_ip;
@@ -432,7 +445,14 @@ static int dg_validate_collisions(const DgConfig *cfg) {
     uint32_t pool_start = dg_ipv4_to_u32(cfg->pool.start);
     uint32_t pool_end = dg_ipv4_to_u32(cfg->pool.end);
 
-    if (cfg->server_ip.s_addr == cfg->pool.start.s_addr || cfg->server_ip.s_addr == cfg->pool.end.s_addr) {
+    uint32_t server_ip = dg_ipv4_to_u32(cfg->server_ip);
+    uint32_t router = dg_ipv4_to_u32(cfg->router);
+
+    /* The allocator only skips static leases, so anything else inside the pool would be handed out. */
+    if (server_ip >= pool_start && server_ip <= pool_end) {
+        return -1;
+    }
+    if (cfg->has_router && router >= pool_start && router <= pool_end) {
         return -1;
     }
 
@@ -456,22 +476,22 @@ static int dg_validate_collisions(const DgConfig *cfg) {
 static int dg_validate_network_ranges(const DgConfig *cfg) {
     size_t i;
 
-    if (!dg_ipv4_in_subnet(cfg->pool.start, cfg->subnet_network, cfg->subnet_mask) ||
-        !dg_ipv4_in_subnet(cfg->pool.end, cfg->subnet_network, cfg->subnet_mask) ||
+    /* Both pool ends being host addresses keeps everything between them a host address too. */
+    if (!dg_ipv4_is_subnet_host(cfg, cfg->pool.start) || !dg_ipv4_is_subnet_host(cfg, cfg->pool.end) ||
         dg_ipv4_to_u32(cfg->pool.end) < dg_ipv4_to_u32(cfg->pool.start)) {
         return -1;
     }
 
-    if (!dg_ipv4_in_subnet(cfg->server_ip, cfg->subnet_network, cfg->subnet_mask)) {
+    if (!dg_ipv4_is_subnet_host(cfg, cfg->server_ip)) {
         return -1;
     }
 
-    if (cfg->has_router && !dg_ipv4_in_subnet(cfg->router, cfg->subnet_network, cfg->subnet_mask)) {
+    if (cfg->has_router && !dg_ipv4_is_subnet_host(cfg, cfg->router)) {
         return -1;
     }
 
     for (i = 0; i < cfg->static_lease_count; i++) {
-        if (!dg_ipv4_in_subnet(cfg->static_leases[i].ip, cfg->subnet_network, cfg->subnet_mask)) {
+        if (!dg_ipv4_is_subnet_host(cfg, cfg->static_leases[i].ip)) {
             return -1;
         }
     }
@@ -480,8 +500,8 @@ static int dg_validate_network_ranges(const DgConfig *cfg) {
 }
 
 static int dg_parse_config_text(char *text, DgConfig *cfg) {
-    char *saveptr = NULL;
     char *line;
+    char *next_line;
     size_t line_no = 0;
     int have_subnet = 0;
     int have_pool_start = 0;
@@ -497,23 +517,25 @@ static int dg_parse_config_text(char *text, DgConfig *cfg) {
     cfg->custom_option_count = 0;
     cfg->static_lease_count = 0;
 
-    line = strtok_r(text, "\n", &saveptr);
-    while (line != NULL) {
+    /* Split by hand: strtok_r() merges empty lines, which would skew line numbers in errors. */
+    for (line = text; line != NULL; line = next_line) {
         char *trimmed_line;
         char *sep;
         char *key;
         char *value;
 
+        next_line = strchr(line, '\n');
+        if (next_line != NULL) {
+            *next_line++ = '\0';
+        }
         line_no++;
         trimmed_line = dg_trim(line);
 
         if (*trimmed_line == '\0' || *trimmed_line == '#' || *trimmed_line == ';') {
-            line = strtok_r(NULL, "\n", &saveptr);
             continue;
         }
 
         if (trimmed_line[0] == '/' && trimmed_line[1] == '/') {
-            line = strtok_r(NULL, "\n", &saveptr);
             continue;
         }
 
@@ -596,8 +618,6 @@ static int dg_parse_config_text(char *text, DgConfig *cfg) {
             dg_log(DG_LOG_ERROR, "config parse error at line %zu: unknown key '%s'", line_no, key);
             return -1;
         }
-
-        line = strtok_r(NULL, "\n", &saveptr);
     }
 
     if (!have_subnet || !have_pool_start || !have_pool_end) {

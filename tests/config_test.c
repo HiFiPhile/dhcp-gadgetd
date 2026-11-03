@@ -34,6 +34,29 @@ static int load_text(const char *suffix, DgConfig *cfg) {
     return rc;
 }
 
+/* Loads a config expected to fail and reports whether the error log contains needle. */
+static int load_fails_logging(const char *suffix, const char *needle) {
+    FILE *log = tmpfile();
+    int saved_stderr = dup(STDERR_FILENO);
+    char text[4096];
+    size_t len;
+    DgConfig cfg;
+
+    assert(log != NULL && saved_stderr >= 0);
+    fflush(stderr);
+    assert(dup2(fileno(log), STDERR_FILENO) >= 0);
+    assert(load_text(suffix, &cfg) != 0);
+    fflush(stderr);
+    assert(dup2(saved_stderr, STDERR_FILENO) >= 0);
+    assert(close(saved_stderr) == 0);
+
+    rewind(log);
+    len = fread(text, 1U, sizeof(text) - 1U, log);
+    text[len] = '\0';
+    assert(fclose(log) == 0);
+    return strstr(text, needle) != NULL;
+}
+
 static void test_custom_options_load(void) {
     DgConfig cfg;
 
@@ -131,11 +154,71 @@ static void test_router(void) {
     assert(load_text("server_ip=192.168.8.2\nrouter=192.168.8.254\n", &cfg) == 0);
     assert(load_text("router=192.168.9.1\n", &cfg) != 0);
     assert(load_text("router=192.168.8.20\nstatic_lease=1-1:1.0=192.168.8.20\n", &cfg) != 0);
+    /* The pool would hand it out. */
+    assert(load_text("router=192.168.8.150\n", &cfg) != 0);
+    assert(load_text("router=192.168.8.200\n", &cfg) != 0);
+}
+
+static void test_address_rules(void) {
+    DgConfig cfg;
+
+    /* Anywhere in the pool, not only at its ends. */
+    assert(load_text("server_ip=192.168.8.100\n", &cfg) != 0);
+    assert(load_text("server_ip=192.168.8.150\n", &cfg) != 0);
+    assert(load_text("server_ip=192.168.8.201\n", &cfg) == 0);
+
+    /* Network and broadcast addresses are not host addresses. */
+    assert(load_text("server_ip=192.168.8.0\n", &cfg) != 0);
+    assert(load_text("server_ip=192.168.8.255\n", &cfg) != 0);
+    assert(load_text("router=192.168.8.255\n", &cfg) != 0);
+    assert(load_text("static_lease=1-1:1.0=192.168.8.255\n", &cfg) != 0);
+    assert(load_text("pool_end=192.168.8.255\n", &cfg) != 0);
+    assert(load_text("pool_end=192.168.8.254\n", &cfg) == 0);
+    assert(load_text("server_ip=192.168.8.250\npool_start=192.168.8.0\n", &cfg) != 0);
+    assert(load_text("server_ip=192.168.8.250\npool_start=192.168.8.1\n", &cfg) == 0);
+
+    /* /31 has neither (RFC 3021), so both addresses are usable. */
+    assert(load_text("subnet=10.0.0.0/31\nserver_ip=10.0.0.0\npool_start=10.0.0.1\npool_end=10.0.0.1\n", &cfg) == 0);
+}
+
+static void test_subnet_prefix(void) {
+    DgConfig cfg;
+
+    assert(load_text("subnet=192.168.8.0/24\n", &cfg) == 0 && cfg.subnet_prefix == 24U);
+    assert(load_text("subnet=192.168.8.0/\n", &cfg) != 0);
+    assert(load_text("subnet=192.168.8.0/+24\n", &cfg) != 0);
+    assert(load_text("subnet=192.168.8.0/ 24\n", &cfg) != 0);
+    assert(load_text("subnet=192.168.8.0/33\n", &cfg) != 0);
+}
+
+static void test_static_lease_path_length(void) {
+    char suffix[DG_MAX_PATH_LEN + 64];
+    char path[DG_MAX_PATH_LEN + 1];
+    DgConfig cfg;
+
+    memset(path, '1', sizeof(path) - 1U);
+    path[sizeof(path) - 1U] = '\0';
+    assert(snprintf(suffix, sizeof(suffix), "static_lease=%s=192.168.8.20\n", path + 1) < (int)sizeof(suffix));
+    assert(load_text(suffix, &cfg) == 0);
+    assert(strlen(cfg.static_leases[0].usb_path) == DG_MAX_PATH_LEN - 1U);
+    /* One more character used to be silently cut off, so the lease could never match. */
+    assert(snprintf(suffix, sizeof(suffix), "static_lease=%s=192.168.8.20\n", path) < (int)sizeof(suffix));
+    assert(load_text(suffix, &cfg) != 0);
+}
+
+static void test_error_line_numbers(void) {
+    /* base_config is lines 1-3; empty, blank and comment lines still count. */
+    assert(load_fails_logging("\n\nbogus=1\n", "at line 6:"));
+    assert(load_fails_logging("\n  \n# comment\n\nlease_time=0\n", "at line 8:"));
 }
 
 int main(void) {
     test_custom_options_load();
     test_router();
+    test_address_rules();
+    test_subnet_prefix();
+    test_static_lease_path_length();
+    test_error_line_numbers();
     test_invalid_custom_options_fail();
     test_custom_option_size_limits();
     test_bridge_name();
