@@ -138,7 +138,25 @@ int dg_allocator_lookup_static(const DgAllocator *allocator, const char *usb_pat
     return -1;
 }
 
-int dg_allocator_assign_dynamic(DgAllocator *allocator, const char *mac, uint64_t now_ms, struct in_addr *out_ip) {
+static int dg_dynamic_candidate_free(const DgAllocator *allocator, uint32_t ip_u32) {
+    return ip_u32 >= allocator->pool_start_u32 && ip_u32 <= allocator->pool_end_u32 &&
+           !dg_static_ip_in_use(allocator, ip_u32) && !dg_dynamic_ip_in_use(allocator, ip_u32);
+}
+
+static void dg_take_dynamic_slot(DgAllocator *allocator, int slot_idx, const char *mac, uint32_t ip_u32,
+                                 uint64_t now_ms) {
+    DgDynamicLease *lease = &allocator->dynamic_leases[slot_idx];
+
+    lease->in_use = 1;
+    strncpy(lease->mac, mac, sizeof(lease->mac) - 1U);
+    lease->mac[sizeof(lease->mac) - 1U] = '\0';
+    lease->ip = dg_u32_to_ipv4(ip_u32);
+    lease->expires_at_ms = dg_compute_expiry(now_ms, allocator->lease_seconds);
+    allocator->dynamic_count++;
+}
+
+int dg_allocator_assign_dynamic(DgAllocator *allocator, const char *mac, const struct in_addr *preferred,
+                                uint64_t now_ms, struct in_addr *out_ip) {
     int existing_idx;
     int slot_idx;
     uint32_t range;
@@ -163,6 +181,16 @@ int dg_allocator_assign_dynamic(DgAllocator *allocator, const char *mac, uint64_
         return -1;
     }
 
+    /*
+     * Reservations live only in memory, so after a restart a renewing client is unknown. Giving it back the
+     * address it holds keeps it from being NAKed and that address from going to another client meanwhile.
+     */
+    if (preferred != NULL && dg_dynamic_candidate_free(allocator, dg_ipv4_to_u32(*preferred))) {
+        dg_take_dynamic_slot(allocator, slot_idx, mac, dg_ipv4_to_u32(*preferred), now_ms);
+        *out_ip = allocator->dynamic_leases[slot_idx].ip;
+        return 0;
+    }
+
     range = allocator->pool_end_u32 - allocator->pool_start_u32 + 1U;
     if (range == 0U) {
         return -1;
@@ -171,19 +199,11 @@ int dg_allocator_assign_dynamic(DgAllocator *allocator, const char *mac, uint64_
     base = allocator->next_candidate_u32;
     for (offset = 0U; offset < range; offset++) {
         uint32_t candidate = allocator->pool_start_u32 + ((base - allocator->pool_start_u32 + offset) % range);
-        if (dg_static_ip_in_use(allocator, candidate)) {
-            continue;
-        }
-        if (dg_dynamic_ip_in_use(allocator, candidate)) {
+        if (!dg_dynamic_candidate_free(allocator, candidate)) {
             continue;
         }
 
-        allocator->dynamic_leases[slot_idx].in_use = 1;
-        strncpy(allocator->dynamic_leases[slot_idx].mac, mac, sizeof(allocator->dynamic_leases[slot_idx].mac) - 1U);
-        allocator->dynamic_leases[slot_idx].mac[sizeof(allocator->dynamic_leases[slot_idx].mac) - 1U] = '\0';
-        allocator->dynamic_leases[slot_idx].ip = dg_u32_to_ipv4(candidate);
-        allocator->dynamic_leases[slot_idx].expires_at_ms = dg_compute_expiry(now_ms, allocator->lease_seconds);
-        allocator->dynamic_count++;
+        dg_take_dynamic_slot(allocator, slot_idx, mac, candidate, now_ms);
 
         allocator->next_candidate_u32 = candidate + 1U;
         if (allocator->next_candidate_u32 > allocator->pool_end_u32 ||

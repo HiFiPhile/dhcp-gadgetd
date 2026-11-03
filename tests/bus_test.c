@@ -299,7 +299,7 @@ int main(void) {
     check_config(&cfg);
     check_empty();
     now = now_ms();
-    assert(dg_allocator_assign_dynamic(allocator, "02:00:00:00:00:01", now, &ip) == 0);
+    assert(dg_allocator_assign_dynamic(allocator, "02:00:00:00:00:01", NULL, now, &ip) == 0);
     check_empty(); /* DISCOVER reservations must not appear as active leases. */
     assert(changes == 0);
     assert(dg_allocator_ack(allocator, mac, id, sizeof(id), ip, now) == 0);

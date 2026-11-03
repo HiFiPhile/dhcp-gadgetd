@@ -7,6 +7,7 @@
 
 static int send_fails;
 static uint8_t sent_type;
+static struct in_addr sent_yiaddr;
 static DgInterfaceEntry iface = {.ifindex = 1, .sock_fd = 42, .usb_path = "1-2:1.0"};
 
 const DgInterfaceEntry *dg_interface_by_ifindex(int ifindex) {
@@ -22,6 +23,7 @@ ssize_t test_sendto(int fd, const void *buffer, size_t length, int flags,
     assert(fd == iface.sock_fd);
     assert(length > 270);
     sent_type = frame[270];
+    memcpy(&sent_yiaddr.s_addr, frame + 44, 4);
     return send_fails ? -1 : (ssize_t)length;
 }
 
@@ -90,6 +92,35 @@ int main(void) {
         assert(dg_handle_release(&request) == 0 && active_count() == 1);
         request.has_server_id = 0;
         assert(dg_handle_release(&request) == 0 && active_count() == 0);
+    }
+
+    /* After a restart the pool is empty: a renewing client keeps its address rather than being NAKed. */
+    dg_allocator_cleanup(allocator);
+    assert(dg_allocator_init(&allocator, &g_state.cfg) == 0);
+    g_state.allocator = allocator;
+    {
+        DgDhcpRequest other = {.ifindex = 1, .chaddr = {2,0,0,0,0,2}, .client_mac = "02:00:00:00:00:02"};
+        struct in_addr held;
+
+        assert(inet_pton(AF_INET, "192.168.8.150", &held) == 1);
+        request.has_requested_ip = 0;
+        request.ciaddr = held;
+        assert(dg_handle_request(&request, 1000) == 0);
+        assert(sent_type == DG_DHCP_TYPE_ACK && sent_yiaddr.s_addr == held.s_addr);
+
+        /* Another client cannot take it, whether rebooting with it or asking for it in DISCOVER. */
+        other.has_requested_ip = 1;
+        other.requested_ip = held;
+        assert(dg_handle_request(&other, 1000) == 0);
+        assert(sent_type == DG_DHCP_TYPE_NAK);
+        assert(dg_handle_discover(&other, 1000) == 0);
+        assert(sent_type == DG_DHCP_TYPE_OFFER && sent_yiaddr.s_addr != held.s_addr);
+
+        /* Addresses outside the pool are never honoured. */
+        assert(dg_allocator_release_mac(allocator, other.client_mac) == 0);
+        other.requested_ip = g_state.cfg.static_leases[0].ip;
+        assert(dg_handle_discover(&other, 1000) == 0);
+        assert(sent_type == DG_DHCP_TYPE_OFFER && sent_yiaddr.s_addr != other.requested_ip.s_addr);
     }
     dg_allocator_cleanup(allocator);
     puts("protocol lease tests passed");

@@ -417,7 +417,8 @@ static int dg_handle_discover(const DgDhcpRequest *req, uint64_t now_ms) {
     if (dg_allocator_lookup_static(g_state.allocator, lease_key, &lease_ip) == 0) {
         used_static_lease = 1;
     } else {
-        if (dg_allocator_assign_dynamic(g_state.allocator, req->client_mac, now_ms, &lease_ip) != 0) {
+        if (dg_allocator_assign_dynamic(g_state.allocator, req->client_mac,
+                                        req->has_requested_ip ? &req->requested_ip : NULL, now_ms, &lease_ip) != 0) {
             dg_log(DG_LOG_WARN, "no available lease for DISCOVER mac=%s", req->client_mac);
             return 0;
         }
@@ -460,7 +461,8 @@ static int dg_handle_request(const DgDhcpRequest *req, uint64_t now_ms) {
     if (dg_allocator_lookup_static(g_state.allocator, lease_key, &assigned_ip) == 0) {
         used_static_lease = 1;
     } else {
-        if (dg_allocator_assign_dynamic(g_state.allocator, req->client_mac, now_ms, &assigned_ip) != 0) {
+        if (dg_allocator_assign_dynamic(g_state.allocator, req->client_mac, have_wanted ? &wanted_ip : NULL, now_ms,
+                                        &assigned_ip) != 0) {
             struct in_addr zero_ip;
             zero_ip.s_addr = 0U;
             (void)dg_send_reply(req, DG_DHCP_TYPE_NAK, zero_ip, 0);
