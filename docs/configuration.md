@@ -20,7 +20,7 @@ the line (`config parse error at line N`).
 | `pool_start` | yes | | First dynamic pool address |
 | `pool_end` | yes | | Last dynamic pool address (inclusive) |
 | `server_ip` | no | first host of `subnet` | Host address on the bridge; also the DHCP server identifier |
-| `router` | no | not sent | Router (option 3) sent to gadgets |
+| `router` | no | not sent | Router (option 3) sent to gadgets; may be `server_ip` when this host routes for them |
 | `dns` | no | not sent | Up to 4 DNS servers, comma-separated |
 | `lease_time` | no | `86400` | Lease duration in seconds |
 | `bridge` | no | `gadget0` | Bridge the daemon manages; see [Host bridge](host-bridge.md) |

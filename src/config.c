@@ -436,10 +436,6 @@ static int dg_validate_collisions(const DgConfig *cfg) {
         return -1;
     }
 
-    if (cfg->has_router && cfg->router.s_addr == cfg->server_ip.s_addr) {
-        return -1;
-    }
-
     for (i = 0; i < cfg->static_lease_count; i++) {
         uint32_t static_ip = dg_ipv4_to_u32(cfg->static_leases[i].ip);
 

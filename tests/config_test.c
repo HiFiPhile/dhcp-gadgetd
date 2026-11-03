@@ -121,8 +121,21 @@ static void test_drivers(void) {
     assert(load_text("drivers=,\n", &cfg) != 0);
 }
 
+static void test_router(void) {
+    DgConfig cfg;
+
+    /* This host as the gadgets' router, the usual case with NAT on the host. */
+    assert(load_text("router=192.168.8.1\n", &cfg) == 0);
+    assert(cfg.has_router);
+    assert(cfg.router.s_addr == cfg.server_ip.s_addr);
+    assert(load_text("server_ip=192.168.8.2\nrouter=192.168.8.254\n", &cfg) == 0);
+    assert(load_text("router=192.168.9.1\n", &cfg) != 0);
+    assert(load_text("router=192.168.8.20\nstatic_lease=1-1:1.0=192.168.8.20\n", &cfg) != 0);
+}
+
 int main(void) {
     test_custom_options_load();
+    test_router();
     test_invalid_custom_options_fail();
     test_custom_option_size_limits();
     test_bridge_name();
